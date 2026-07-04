@@ -1,0 +1,50 @@
+### Sensitive config
+config.yaml
+
+### Databases
+*.db
+*.sqlite
+
+### Virtual environments
+scalper_env/
+venv/
+.venv/
+
+### Cache
+*.csv
+
+### Operating System files
+.DS_Store
+Thumbs.db
+
+### Logs
+*.log
+logs/
+
+### Dependency directories
+node_modules/
+vendor/
+
+### Build directories
+dist/
+build/
+out/
+
+### Environment files
+.env
+.env.*
+
+### IDE / Editor folders
+.vscode/
+.idea/
+*.iml
+
+### Python specific
+__pycache__/
+*.pyc
+*.pyo
+
+### Miscellaneous
+*.tmp
+*.bak
+*.swp

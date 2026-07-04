@@ -1,0 +1,562 @@
+"""icarus.orchestrator — Cœur du bot de trading multi-paires.
+
+Remplace l'ancien scaler_loop.py.  L'orchestrateur :
+  • Initialise N DataProviders (un par paire) avec injection de dépendances
+  • À chaque itération, scanne toutes les paires et garde le meilleur signal
+  • Connecte les événements (pub/sub via EventBus)
+  • Exécute une boucle de maintenance légère (health check, dashboard)
+  • Délègue la logique métier aux modules (Signal/Risk/Execution)
+  • Envoie les notifications Telegram (trades, santé, rapport quotidien)
+  • Gère le graceful shutdown proprement
+
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal as signal_module
+import time
+from typing import Dict, List, Optional
+
+from icarus.config.loader import load_config
+from icarus.config.models import BaseConfig
+from icarus.core.events import EventBus, EventType
+from icarus.core.interfaces import (
+    DataProvider,
+    ExecutionEngine,
+    RiskEngine,
+    SignalEngine,
+)
+from icarus.core.types import (
+    ClosedTrade,
+    ComponentStatus,
+    MarketSnapshot,
+    MicroStructure,
+    OrderRequest,
+    TradeAction,
+    TradingSignal,
+)
+from icarus.data.stream import BinanceDataProvider
+from icarus.execution.engine import ExecutionController
+from icarus.monitoring.dashboard import Dashboard
+from icarus.monitoring.health import HealthMonitor
+from icarus.monitoring.telegram import TelegramNotifier
+from icarus.risk.engine import RiskController
+from icarus.signal.engine import ScalpingSignalEngine
+
+logger = logging.getLogger("Orchestrator")
+
+# Type pour un signal avec sa paire associée
+SignalScore = tuple[str, TradingSignal, float]  # (symbol, signal, score)
+
+
+class Orchestrator:
+    """Orchestrateur principal du bot Icarus (multi-paires).
+
+    Parameters
+    ----------
+    config_path: str
+        Chemin vers le fichier de configuration YAML.
+    """
+
+    def __init__(self, config_path: str = "config.yaml"):
+        # Chargement de la configuration
+        self._raw_config: BaseConfig = load_config(config_path)
+        self._cfg = self._raw_config.scalping
+        self._exchange_cfg = self._raw_config.exchange
+        self._telegram_cfg = self._raw_config.telegram
+
+        # Bus d'événements global
+        self._bus = EventBus()
+
+        # Data providers (un par paire)
+        self._data_providers: Dict[str, DataProvider] = {}
+
+        # Modules uniques
+        self._signal: Optional[SignalEngine] = None
+        self._risk: Optional[RiskEngine] = None
+        self._execution: Optional[ExecutionEngine] = None
+        self._health: Optional[HealthMonitor] = None
+        self._dashboard: Optional[Dashboard] = None
+
+        # Telegram
+        self._telegram: Optional[TelegramNotifier] = None
+
+        # État
+        self._running = False
+        self._cooldown_until: float = 0.0
+        self._signals_count = 0
+        self._start_time = 0.0
+        self._current_symbol: Optional[str] = None  # paire actuellement tradée
+
+        # Dernières valeurs (pour dashboard/telegram)
+        self._last_micros: Dict[str, MicroStructure] = {}
+        self._last_scores: Dict[str, float] = {}
+        self._last_trade: Optional[ClosedTrade] = None
+        self._last_health_statuses: List = []
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Initialisation
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _init_components(self) -> None:
+        """Instancie tous les modules avec injection de dépendances."""
+        logger.info("Initialisation des composants...")
+
+        symbols = self._cfg.symbols
+        logger.info(f"  Paires configurées: {', '.join(symbols)}")
+
+        # Data providers (un par paire)
+        for sym in symbols:
+            provider = BinanceDataProvider(
+                symbol=sym,
+                buffer_size=200,
+                event_bus=self._bus,
+                stale_timeout=self._raw_config.health.stale_data_critical,
+            )
+            self._data_providers[sym] = provider
+            logger.info(f"    ✅ DataProvider: {sym}")
+
+        # Signal (un seul, générique — la paire est dans le snapshot)
+        self._signal = ScalpingSignalEngine(config=self._cfg)
+
+        # Risk
+        self._risk = RiskController(config=self._cfg, db_path="icarus_risk.db")
+
+        # Execution
+        self._execution = ExecutionController(
+            config=self._cfg,
+            exchange_cfg=self._exchange_cfg,
+        )
+
+        # Health (avec le premier data provider pour l'interface)
+        # Note: le health monitor sera étendu pour vérifier tous les providers
+        self._health = HealthMonitor(
+            data=list(self._data_providers.values())[0],
+            signal=self._signal,
+            risk=self._risk,
+            execution=self._execution,
+        )
+
+        # Dashboard
+        self._dashboard = Dashboard(
+            symbol=symbols[0],
+            refresh_interval=2.0,
+        )
+
+        # Telegram
+        self._telegram = TelegramNotifier(config=self._telegram_cfg)
+
+        logger.info("✅ Tous les composants sont prêts.")
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Cycle de vie principal
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def run(self) -> None:
+        """Point d'entrée principal. Exécute le cycle de vie complet."""
+        # 1. Initialisation
+        self._init_components()
+        self._running = True
+        self._start_time = time.time()
+
+        # 2. Démarrage de tous les DataStreams
+        for sym, provider in self._data_providers.items():
+            await provider.start()
+        logger.info("🚀 Tous les flux de données sont démarrés.")
+
+        # 3. Attente des premières données sur au moins une paire
+        logger.info(f"⏳ Attente des premières données (50+ bougies 1m)...")
+        await self._wait_for_data()
+
+        logger.info("✅ Données suffisantes. Lancement de la boucle principale.")
+
+        # 4. Notification startup Telegram
+        await self._notify_startup()
+
+        # 5. Enregistrement du graceful shutdown
+        self._register_signal_handlers()
+
+        # 6. Boucle principale
+        try:
+            await self._main_loop()
+        except asyncio.CancelledError:
+            logger.info("Boucle principale annulée.")
+        finally:
+            await self._shutdown()
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Boucle principale (polling multi-paires)
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _main_loop(self) -> None:
+        """Boucle de coordination principale.
+
+        À chaque itération :
+        1. Récupérer les snapshots de TOUTES les paires
+        2. Surveiller les ordres en attente et trades actifs
+        3. Traiter les trades clôturés (+ alertes Telegram)
+        4. Scanner toutes les paires, garder le meilleur signal
+        5. Mettre à jour le dashboard
+        6. Health check périodique
+        7. Rapport quotidien Telegram
+        """
+        interval = self._cfg.execution_loop_seconds
+        last_health_check = 0.0
+        last_daily_check = 0.0
+
+        while self._running:
+            try:
+                # ── 1. DATA : Snapshots de toutes les paires ────────────
+                snapshots = self._get_all_snapshots()
+
+                # Mise à jour du mid_price pour l'exécution (prendre une paire active)
+                mid_price = 0.0
+                for snap in snapshots.values():
+                    if snap and snap.micro.mid_price > 0:
+                        mid_price = snap.micro.mid_price
+                        break
+
+                self._update_last_micros(snapshots)
+
+                # ── 2. EXECUTION : Surveiller ordres & trades ───────────
+                if self._execution:
+                    await self._execution._monitor_pending_orders()
+                    if mid_price > 0:
+                        await self._execution.update_with_price(mid_price)
+
+                # ── 3. EXECUTION : Traiter les trades clôturés ──────────
+                await self._process_closed_trades()
+
+                # ── 4. SIGNAL : Scanner toutes les paires ───────────────
+                await self._scan_and_trade(snapshots)
+
+                # ── 5. DASHBOARD ───────────────────────────────────────
+                self._render_dashboard()
+
+                # ── 6. HEALTH CHECK ────────────────────────────────────
+                now = time.time()
+                if self._health and (now - last_health_check) > self._raw_config.health.interval_seconds:
+                    self._last_health_statuses = self._health.check_all() or []
+                    if not self._health.is_healthy():
+                        # Notifier Telegram
+                        if self._telegram:
+                            unhealthy = [s for s in self._last_health_statuses if s.status.value != "healthy"]
+                            if unhealthy:
+                                await self._telegram.send_health_alert(unhealthy)
+
+                        logger.error("[Orchestrator] ⛔ Health check FAILED — arrêt d'urgence.")
+                        self._running = False
+                        break
+                    last_health_check = now
+
+                # ── 7. RAPPORT QUOTIDIEN Telegram ───────────────────────
+                if self._telegram and (now - last_daily_check) > 3600:  # vérifie toutes les heures
+                    hour = time.localtime().tm_hour
+                    if hour == self._telegram_cfg.daily_report_hour:
+                        balance = 0.0
+                        try:
+                            balance = await self._execution.get_balance("USDT")
+                        except Exception:
+                            pass
+                        await self._telegram.send_daily_report(
+                            self._risk.get_stats(), balance
+                        )
+                    last_daily_check = now
+
+                # ── END ITERATION ──────────────────────────────────────
+                await asyncio.sleep(interval)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception(f"[Orchestrator] Erreur dans la boucle principale: {e}")
+                await asyncio.sleep(5)
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Snapshots multi-paires
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _get_all_snapshots(self) -> Dict[str, Optional[MarketSnapshot]]:
+        """Récupère les snapshots de toutes les paires."""
+        results: Dict[str, Optional[MarketSnapshot]] = {}
+        for sym, provider in self._data_providers.items():
+            try:
+                results[sym] = provider.get_snapshot()
+            except Exception as e:
+                logger.debug(f"[Orchestrator] Snapshot {sym} indisponible: {e}")
+                results[sym] = None
+        return results
+
+    def _update_last_micros(self, snapshots: Dict[str, Optional[MarketSnapshot]]) -> None:
+        """Met à jour les dernières microstructures connues."""
+        for sym, snap in snapshots.items():
+            if snap and snap.micro.mid_price > 0:
+                self._last_micros[sym] = snap.micro
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Scanner multi-paires → meilleur signal
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _scan_and_trade(self, snapshots: Dict[str, Optional[MarketSnapshot]]) -> None:
+        """Scanne toutes les paires, classe par score décroissant, trade le meilleur.
+
+        Parameters
+        ----------
+        snapshots: dict
+            Symbol → MarketSnapshot (ou None si indisponible).
+        """
+        # Garde-fous
+        if time.time() < self._cooldown_until:
+            return
+
+        pending = await self._execution.get_pending_orders_count()
+        if pending > 0:
+            return
+
+        active = await self._execution.get_open_positions_count()
+        if active >= self._risk.max_positions:
+            return
+
+        # Circuit breaker
+        try:
+            balance = await self._execution.get_balance("USDT")
+        except Exception:
+            logger.debug("[Orchestrator] Impossible de récupérer le solde.")
+            return
+
+        halted, reason = self._risk.check_circuit_breaker(balance)
+        if halted:
+            logger.debug(f"[Orchestrator] Circuit breaker: {reason}")
+            return
+
+        # Scanner toutes les paires et récolter les scores
+        candidates: List[SignalScore] = []
+
+        for sym, snap in snapshots.items():
+            if snap is None:
+                continue
+
+            try:
+                signal = self._signal.generate(snap)
+            except Exception as e:
+                logger.debug(f"[Orchestrator] Signal {sym} erreur: {e}")
+                continue
+
+            if signal.action == TradeAction.WAIT:
+                continue
+
+            # On garde le score brut (déjà dans le signal)
+            candidates.append((sym, signal, signal.score))
+            self._last_scores[sym] = signal.score
+
+        if not candidates:
+            self._signals_count += 0  # ne compte pas les WAIT
+            return
+
+        # Trier par score décroissant
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        best_sym, best_signal, best_score = candidates[0]
+
+        logger.info(
+            f"[Orchestrator] 📊 Classement: "
+            + " | ".join(f"{s}: {sc:.1f}" for s, _, sc in candidates[:3])
+        )
+
+        # Validation par le RiskEngine
+        validated = self._risk.validate_and_size(best_signal, balance, active)
+        self._signals_count += 1
+
+        if not validated.is_valid:
+            logger.debug(f"[Orchestrator] Signal {best_sym} rejeté: {validated.reason}")
+            return
+
+        # Exécution
+        client_id = self._execution.generate_client_id()
+        order = OrderRequest(
+            client_id=client_id,
+            symbol=best_sym,
+            side="buy" if best_signal.action == TradeAction.BUY else "sell",
+            order_type="limit",
+            amount=validated.position.amount,
+            price=best_signal.entry,
+            sl=best_signal.sl,
+            tp1=best_signal.tp1,
+            tp2=best_signal.tp2,
+            tp1_fraction=best_signal.tp1_fraction,
+        )
+
+        success = await self._execution.place_order(order)
+        if success:
+            self._cooldown_until = time.time() + self._cfg.cooldown_seconds
+            self._current_symbol = best_sym
+            logger.info(
+                f"[Orchestrator] ✅ ORDRE PLACÉ [{best_sym}]: {best_signal.action.value} "
+                f"{validated.position.amount} @ {best_signal.entry}"
+            )
+        else:
+            logger.warning("[Orchestrator] Échec du placement d'ordre.")
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Trades clôturés
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _process_closed_trades(self) -> None:
+        """Récupère les trades clôturés, met à jour le RiskEngine et notifie Telegram."""
+        closed = await self._execution.get_closed_trades()
+        for trade in closed:
+            self._risk.record_trade(trade)
+            self._last_trade = trade
+            logger.info(
+                f"[Orchestrator] Trade clôturé: {trade.client_id} [{trade.symbol}] | "
+                f"PnL: {trade.pnl:+.2f} $ | {trade.reason.value}"
+            )
+
+            # Notification Telegram
+            if self._telegram:
+                await self._telegram.send_trade_alert(trade)
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Dashboard (enrichi multi-paires)
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _render_dashboard(self) -> None:
+        """Met à jour le dashboard avec les données multi-paires."""
+        if not self._dashboard:
+            return
+
+        cooldown = max(0.0, self._cooldown_until - time.time())
+        active = 0
+        pending = 0
+        if self._execution:
+            try:
+                # On ne peut pas await ici car le dashboard tourne pas en async,
+                # mais get_open_positions_count utilise un lock synchrone
+                pass  # sera récupéré en appelant directement
+            except Exception:
+                pass
+
+        # Choisir la microstructure de la paire active ou la première dispo
+        primary_micro = None
+        if self._current_symbol and self._current_symbol in self._last_micros:
+            primary_micro = self._last_micros[self._current_symbol]
+        elif self._last_micros:
+            primary_micro = next(iter(self._last_micros.values()))
+
+        risk_stats = self._risk.get_stats() if self._risk else None
+
+        # Enrichir le dashboard avec les scores par paire
+        scores_summary = ", ".join(
+            f"{sym}: {score:.0f}" for sym, score in sorted(
+                self._last_scores.items(), key=lambda x: x[1], reverse=True
+            )[:5]
+        )
+
+        self._dashboard.render(
+            micro=primary_micro,
+            risk_stats=risk_stats,
+            signals_generated=self._signals_count,
+            active_positions=active,
+            pending_orders=pending,
+            last_trade=self._last_trade,
+            health_statuses=self._last_health_statuses if self._last_health_statuses else None,
+            cooldown_remaining=cooldown,
+        )
+
+        # Afficher en plus les scores
+        if scores_summary:
+            print(f"\033[38;5;240m  📊 Scores: {scores_summary}\033[0m")
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Wait for data
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _wait_for_data(self) -> None:
+        """Attend qu'au moins une paire ait assez de données."""
+        while self._running:
+            for sym, provider in self._data_providers.items():
+                if provider.buffer.count >= 50:
+                    logger.info(f"  ✅ {sym}: {provider.buffer.count} bougies prêtes.")
+                    return
+            await asyncio.sleep(2)
+            counts = {s: p.buffer.count for s, p in self._data_providers.items()}
+            logger.debug(f"  Buffers: {counts}")
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Telegram
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _notify_startup(self) -> None:
+        """Envoie une notification Telegram au démarrage."""
+        if not self._telegram:
+            return
+
+        symbols_str = ", ".join(self._cfg.symbols)
+        summary = (
+            f"📋 <b>Configuration</b>\n"
+            f"Paires: {symbols_str}\n"
+            f"TP1: {self._cfg.tp1_percent*100:.1f}% | TP2: {self._cfg.tp2_percent*100:.1f}%\n"
+            f"SL: {self._cfg.fixed_sl_percent*100:.1f}% | Cooldown: {self._cfg.cooldown_seconds}s\n"
+            f"Risque/trade: {self._cfg.risk_per_trade*100:.1f}% | Kelly: {self._cfg.kelly_fraction*100:.0f}%\n"
+            f"Seuil score: {self._cfg.threshold_base:.0f}"
+        )
+        await self._telegram.send_startup(summary)
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Shutdown
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _register_signal_handlers(self) -> None:
+        """Enregistre les handlers pour SIGINT et SIGTERM."""
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal_module.SIGINT, signal_module.SIGTERM):
+                try:
+                    loop.add_signal_handler(
+                        sig,
+                        lambda s=sig: asyncio.create_task(self._shutdown()),
+                    )
+                except NotImplementedError:
+                    pass  # Windows
+        except Exception:
+            logger.debug("Signal handlers non supportés sur cette plateforme.")
+
+    async def _shutdown(self) -> None:
+        """Arrêt propre de tous les modules."""
+        if not self._running:
+            return
+
+        logger.info("🛑 Arrêt du bot en cours...")
+        self._running = False
+
+        # Annuler tous les ordres en attente
+        if self._execution:
+            try:
+                cancelled = await self._execution.cancel_all()
+                logger.info(f"  {cancelled} ordres annulés.")
+            except Exception as e:
+                logger.warning(f"  Erreur annulation ordres: {e}")
+
+        # Arrêter tous les DataStreams
+        for sym, provider in self._data_providers.items():
+            try:
+                await provider.stop()
+                logger.info(f"  DataStream {sym} arrêté.")
+            except Exception as e:
+                logger.warning(f"  Erreur arrêt DataStream {sym}: {e}")
+
+        # Fermer l'exchange
+        if self._execution:
+            try:
+                await self._execution.close()
+            except Exception as e:
+                logger.warning(f"  Erreur fermeture exchange: {e}")
+
+        # Fermer le notificateur Telegram
+        if self._telegram:
+            await self._telegram.send_stop("Manuel (Ctrl+C)")
+            await self._telegram.close()
+
+        logger.info("✅ Bot arrêté proprement.")

@@ -1,0 +1,101 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# 🤖 ICARUS — Configuration du bot de scalping intraday
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Copiez ce fichier en `config.yaml` et remplissez vos clés.
+#   cp config.yaml.example config.yaml
+#
+# TOUTES les valeurs en pourcentage sont en DÉCIMAL.
+# Ex: 0.005 = 0,5%   |   0.02 = 2%
+#
+# ⚠️  NE PAS MODIFIER les pondérations des indicateurs sans
+#     recalibrer avec parameter_optimizer.py d'abord !
+# ═══════════════════════════════════════════════════════════════════════════
+
+scalping:
+  # ── Paires tradées ──
+  symbols:
+    - SOL/USDT
+    - HYPE/USDT
+    - DOGE/USDT
+
+  # ── Boucle d'exécution ──
+  execution_loop_seconds: 5
+
+  # ── Paramètres des ordres ──
+  tp1_percent: 0.006              # 0.6%
+  tp2_percent: 0.010              # 1.0%
+  fixed_sl_percent: 0.004         # 0.4%
+  tp1_fraction: 0.6               # 60% au TP1
+  trailing_callback: 0.003        # 0.3%
+  trailing_activation: 0.5
+  entry_timeout_seconds: 15
+
+  # ── Seuils des indicateurs ──
+  rsi_oversold: 35
+  rsi_overbought: 65
+  volume_surge_threshold: 1.8
+
+  # ── Scoring ──
+  threshold_base: 65.0
+
+  # ── Filtres de sécurité ──
+  min_atr_percent: 0.0015
+  max_atr_percent: 0.010
+  spread_max_percent: 0.0005
+
+  # ── Gestion du risque ──
+  risk_per_trade: 0.0025          # 0.25% du capital
+  max_daily_loss_percent: 0.02    # 2% → circuit breaker
+  max_positions: 1
+  kelly_fraction: 0.15
+  cooldown_seconds: 180
+
+  # ── Frais (Binance spot) ──
+  fee_maker: 0.0002               # 0.02%
+  fee_taker: 0.0004               # 0.04%
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Exchange
+# ═══════════════════════════════════════════════════════════════════════════
+exchange:
+  exchange: binance
+  api_key: "VOTRE_API_KEY_BINANCE"
+  api_secret: "VOTRE_API_SECRET_BINANCE"
+  sandbox: true
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Telegram (NOTIFICATIONS)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Pour activer :
+#   1. Créer un bot via @BotFather sur Telegram → obtenir le token
+#   2. Envoyer /start à ton bot, puis aller sur @userinfobot → obtenir ton chat_id
+#   3. Remplir ci-dessous et mettre enabled: true
+#
+telegram:
+  enabled: false
+  bot_token: "VOTRE_TOKEN_BOTFATHER"
+  chat_id: "VOTRE_CHAT_ID"
+  notify_on_trade: true
+  notify_on_health: true
+  daily_report: true
+  daily_report_hour: 20
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Application
+# ═══════════════════════════════════════════════════════════════════════════
+app:
+  debug: false
+  log_level: INFO
+  log_file: icarus.log
+  dashboard: true
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Health
+# ═══════════════════════════════════════════════════════════════════════════
+health:
+  interval_seconds: 30
+  stale_data_warning: 15
+  stale_data_critical: 30
+  max_reconnect_attempts: 10
