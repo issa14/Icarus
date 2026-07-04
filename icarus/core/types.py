@@ -210,8 +210,9 @@ class IndicatorSuite:
     volume_surge_quality: float
 
     # ── Méta ──
-    ready: bool           # True si assez de données pour tous les indicateurs
-    regime: MarketRegime  # Régime de marché détecté
+    ready: bool            # True si assez de données pour tous les indicateurs
+    regime: MarketRegime   # Régime de marché détecté
+    ranging_score: float   # 0-1, 1 = marché complètement rangeant (à éviter)
 
 
 @dataclass(frozen=True, slots=True)

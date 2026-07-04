@@ -5,13 +5,16 @@ Extrait de signal_factory.py.  Logique IDENTIQUE à la production :
   • MEMES scores continus (RSI, Bollinger, Volume, Engulfing, Choppiness)
   • MEME seuil adaptatif basé sur l'ATR
 
+V2: Pénalité de ranging (market_state.py) intégrée.
+
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from icarus.core.types import (
     Direction,
@@ -20,6 +23,8 @@ from icarus.core.types import (
     TradingSignal,
     TradeAction,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── Pondérations de production (NE PAS MODIFIER sans recalibration complète) ──
@@ -38,39 +43,20 @@ MAX_SCORE = 100.0
 # ═══════════════════════════════════════════════════════════════════════════
 
 def score_long(indicators: IndicatorSuite, micro: MicroStructure) -> float:
-    """Calcule le score de conviction pour un signal LONG (0-100).
-
-    Parameters
-    ----------
-    indicators: IndicatorSuite
-        Métriques calculées par le SignalEngine.
-    micro: MicroStructure
-        Microstructure courante (pour le bonus imbalance).
-
-    Returns
-    -------
-    float entre 0 et 100.
-    """
+    """Calcule le score de conviction pour un signal LONG (0-100)."""
     score = 0.0
 
-    # 1. RSI survendu → score continu
     score += WEIGHTS["rsi_extreme"] * MAX_SCORE * indicators.rsi_long_score
-
-    # 2. Bollinger : prix sous la bande inférieure
     score += WEIGHTS["bollinger_touch"] * MAX_SCORE * indicators.bollinger_long_score
 
-    # 3. Engulfing haussier (vérification explicite de la direction)
     if indicators.engulfing == 1:
         score += WEIGHTS["engulfing"] * MAX_SCORE * indicators.engulfing_quality
 
-    # 4. Volume Surge (score continu symétrique)
     score += WEIGHTS["volume_surge"] * MAX_SCORE * indicators.volume_surge_quality
 
-    # 5. Tendance forte (choppiness < 38.2)
     if indicators.choppiness < 38.2:
         score += WEIGHTS["trend_confirmation"] * MAX_SCORE
 
-    # Bonus microstructure : pression acheteuse (imbalance > 0.6)
     if micro.imbalance > 0.6:
         score += 5.0
 
@@ -85,24 +71,17 @@ def score_short(indicators: IndicatorSuite, micro: MicroStructure) -> float:
     """Calcule le score de conviction pour un signal SHORT (0-100)."""
     score = 0.0
 
-    # 1. RSI suracheté
     score += WEIGHTS["rsi_extreme"] * MAX_SCORE * indicators.rsi_short_score
-
-    # 2. Bollinger : prix au-dessus de la bande supérieure
     score += WEIGHTS["bollinger_touch"] * MAX_SCORE * indicators.bollinger_short_score
 
-    # 3. Engulfing baissier
     if indicators.engulfing == -1:
         score += WEIGHTS["engulfing"] * MAX_SCORE * indicators.engulfing_quality
 
-    # 4. Volume Surge
     score += WEIGHTS["volume_surge"] * MAX_SCORE * indicators.volume_surge_quality
 
-    # 5. Tendance forte
     if indicators.choppiness < 38.2:
         score += WEIGHTS["trend_confirmation"] * MAX_SCORE
 
-    # Bonus microstructure : pression vendeuse (imbalance < 0.4)
     if micro.imbalance < 0.4:
         score += 5.0
 
@@ -118,17 +97,6 @@ def adaptive_threshold(atr_percent: float, base_threshold: float) -> float:
 
     - ATR bas (< 0.2%)  → seuil abaissé de 5 pts (plus permissif)
     - ATR haut (> 0.6%) → seuil relevé de 5 pts (plus strict)
-
-    Parameters
-    ----------
-    atr_percent: float
-        ATR en % du prix (ex: 0.003 = 0.3%).
-    base_threshold: float
-        Seuil de base (ex: 60.0).
-
-    Returns
-    -------
-    Seuil ajusté.
     """
     if atr_percent < 0.002:
         return base_threshold - 5.0
@@ -149,30 +117,7 @@ def calculate_levels(
     tp2: float,
     atr_percent: float = 0.002,
 ) -> Dict[str, float]:
-    """Calcule les prix opérationnels (entry limit, SL, TP1, TP2).
-
-    L'entry_offset est adaptatif : min(0.0005, max(0.0001, atr_percent * 0.08)).
-
-    Parameters
-    ----------
-    mid_price: float
-        Prix milieu du carnet d'ordres.
-    direction: Direction
-        LONG ou SHORT.
-    fixed_sl: float
-        Stop-loss en % (décimal, ex: 0.005 = 0.5%).
-    tp1: float
-        Take-profit 1 en %.
-    tp2: float
-        Take-profit 2 en %.
-    atr_percent: float
-        ATR en % pour l'offset adaptatif.
-
-    Returns
-    -------
-    dict avec ``entry``, ``sl``, ``tp1``, ``tp2`` (arrondis à 2 décimales).
-    """
-    # entry_offset adaptatif
+    """Calcule les prix opérationnels (entry limit, SL, TP1, TP2)."""
     entry_offset = min(0.0005, max(0.0001, atr_percent * 0.08))
 
     if direction == Direction.LONG:
@@ -205,29 +150,24 @@ def safety_filters_ok(
     max_atr: float,
     max_spread: float,
 ) -> Tuple[bool, str]:
-    """Vérifie les filtres stricts avant d'accepter un signal.
-
-    Returns
-    -------
-    (True, "") si tout est ok, (False, "raison") sinon.
-    """
+    """Vérifie les filtres stricts avant d'accepter un signal."""
     if not indicators.ready:
         return False, "Données insuffisantes"
 
-    # ATR dans la plage acceptable
     atr_pct = indicators.atr_percent
     if not (min_atr <= atr_pct <= max_atr):
         return False, f"ATR hors plage ({atr_pct:.4f})"
 
-    # Spread pas trop large
     if micro.spread > max_spread:
         return False, f"Spread trop large ({micro.spread:.5f})"
 
-    # Marché en range (choppiness > 61.8) → pas de trade
     if indicators.choppiness > 61.8:
         return False, f"Marché en range (Choppiness={indicators.choppiness:.1f})"
 
-    # Engulfing sur marché trop plat → faux signal probable
+    # Filtre ranging avancé (market_state)
+    if indicators.ranging_score >= 0.75:
+        return False, f"Marché trop rangeant (ranging={indicators.ranging_score:.2f})"
+
     if indicators.engulfing != 0 and atr_pct < 0.0008:
         return False, "Engulfing sur marché trop plat"
 
@@ -247,29 +187,16 @@ def build_signal(
     tp2: float,
     tp1_fraction: float = 0.6,
 ) -> TradingSignal:
-    """Point d'entrée unique : évalue les scores et retourne un TradingSignal.
-
-    Parameters
-    ----------
-    indicators: IndicatorSuite
-        Tous les indicateurs calculés.
-    micro: MicroStructure
-        Microstructure courante.
-    base_threshold: float
-        Seuil de score pour déclencher.
-    fixed_sl, tp1, tp2: float
-        Paramètres de SL/TP (en décimal).
-    tp1_fraction: float
-        Fraction clôturée au TP1.
-
-    Returns
-    -------
-    TradingSignal (action=WAIT si aucun signal valide).
-    """
+    """Point d'entrée unique : évalue les scores et retourne un TradingSignal."""
     threshold = adaptive_threshold(indicators.atr_percent, base_threshold)
 
     sl = score_long(indicators, micro)
     ss = score_short(indicators, micro)
+
+    # Pénalité de ranging : si ranging_score > 0.6, on réduit le score
+    ranging_penalty = 1.0 - min(1.0, max(0.0, indicators.ranging_score - 0.6) / 0.4)
+    sl *= ranging_penalty
+    ss *= ranging_penalty
 
     direction = None
     score = 0.0
@@ -294,7 +221,6 @@ def build_signal(
             timestamp=time.time(),
         )
 
-    # Calcul des niveaux de prix
     levels = calculate_levels(
         mid_price=micro.mid_price,
         direction=direction,

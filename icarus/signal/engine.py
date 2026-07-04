@@ -40,6 +40,7 @@ from icarus.signal.indicators import (
     rsi_continuous,
     volume_surge_quality,
 )
+from icarus.signal.market_state import compute_ranging_score
 from icarus.signal.scoring import build_signal, safety_filters_ok
 
 logger = logging.getLogger(__name__)
@@ -251,6 +252,9 @@ class ScalpingSignalEngine(SignalEngineInterface):
         # ── Régime de marché ──
         regime = self._classify_regime(chop, atr_pct)
 
+        # ── Ranging Score (market_state) ──
+        ranging = compute_ranging_score(highs, lows, closes, period=10)
+
         # ── Ready ──
         ready = len(closes) >= 50 and atr_val > 0
 
@@ -270,6 +274,7 @@ class ScalpingSignalEngine(SignalEngineInterface):
             volume_surge_quality=vol_surge_qual,
             ready=ready,
             regime=regime,
+            ranging_score=ranging,
         )
 
     @staticmethod
