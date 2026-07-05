@@ -36,7 +36,7 @@ from icarus.signal.engine import ScalpingSignalEngine
 logger = logging.getLogger(__name__)
 
 # ── Paramètres de simulation (constants) ─────────────────────────────────
-SIMULATED_SPREAD = 0.0002      # 0.02% (match Binance spot)
+SIMULATED_SPREAD = 0.0002      # 0.02% (match Binance futures)
 SIMULATED_IMBALANCE = 0.5       # neutre
 SIMULATED_BID_ASK_RATIO = 0.0001  # bid_vol / ask_vol
 FEE_TAKER = 0.0004              # 0.04% (Binance taker)

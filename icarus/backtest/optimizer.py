@@ -50,7 +50,7 @@ LEVERAGE_RANGE = [1, 2, 3, 5, 10, 20]          # Futures only
 
 # ── Cache & output dirs ──────────────────────────────────────────────────
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "icarus" / "cache"
-OUTPUT_CSV_SPOT = Path(__file__).resolve().parent / "optimizer_results_spot.csv"
+OUTPUT_CSV = Path(__file__).resolve().parent / "optimizer_results.csv"
 OUTPUT_CSV_FUTURES = Path(__file__).resolve().parent / "optimizer_results_futures.csv"
 
 
@@ -283,7 +283,7 @@ def save_results(results: List[dict], output_path: Path, *, is_futures: bool = F
     logger.info(f"📄 Results saved to {output_path}")
 
     # Display top 5
-    mode = "FUTURES" if is_futures else "SPOT"
+    mode = "FUTURES" if is_futures else "LEGACY"
     print("\n" + "=" * 80)
     print(f"🏆 TOP 5 — BEST PARAMS ({mode})")
     print("=" * 80)
@@ -374,7 +374,7 @@ def main():
         save_results(results, OUTPUT_CSV_FUTURES, is_futures=True)
     else:
         results = grid_search_spot(csv_path, symbol, base_config)
-        save_results(results, OUTPUT_CSV_SPOT)
+        save_results(results, OUTPUT_CSV)
 
 
 if __name__ == "__main__":

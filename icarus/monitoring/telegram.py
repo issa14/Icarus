@@ -132,7 +132,7 @@ class TelegramBot:
 
     # ── Cycle de vie ────────────────────────────────────────────────────
 
-    async def start(self) -> None:
+    async def start_bot(self) -> None:
         """Démarre le sender worker et le poller de commandes."""
         if not self.is_available:
             return

@@ -69,9 +69,7 @@ exchange:
   #     Le bot utilise maintenant le DEMO TRADING (demo-fapi.binance.com).
   #     Laissez sandbox: true pour activer le mode démo.
   sandbox: true
-  # OBLIGATOIRE — ce bot ne supporte que les futures (USDS-M).
-  # Les flux WebSocket, l'exécution et le sizing sont tous futures-only.
-  futures: true
+  # Icarus v3.1+ est 100% Futures (USDS-M). Le flag `futures` a été retiré.
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Telegram (NOTIFICATIONS)

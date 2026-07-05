@@ -40,11 +40,11 @@ from icarus.core.types import (
     TradingSignal,
 )
 from icarus.data.stream import BinanceDataProvider
-from icarus.execution import SpotExecutionController, FuturesExecutionController
+from icarus.execution import FuturesExecutionController
 from icarus.monitoring.dashboard import Dashboard
 from icarus.monitoring.health import HealthMonitor
 from icarus.monitoring.telegram import TelegramBot
-from icarus.risk import SpotRiskController, FuturesRiskController
+from icarus.risk import FuturesRiskController
 from icarus.signal.engine import ScalpingSignalEngine
 
 logger = logging.getLogger("Orchestrator")
@@ -113,7 +113,7 @@ class Orchestrator:
 
     async def _prepare_execution(self) -> None:
         """Prépare la session futures si l'on trade sur les marchés dérivés."""
-        if self._exchange_cfg.futures and isinstance(self._execution, FuturesExecutionController):
+        if isinstance(self._execution, FuturesExecutionController):
             await self._execution.initialize_futures_account()
 
     def _init_components(self) -> None:
@@ -130,7 +130,7 @@ class Orchestrator:
                 buffer_size=200,
                 event_bus=self._bus,
                 stale_timeout=self._raw_config.health.stale_data_critical,
-                futures=self._exchange_cfg.futures,
+                futures=True,
                 sandbox=self._exchange_cfg.sandbox,
             )
             self._data_providers[sym] = provider
@@ -139,23 +139,14 @@ class Orchestrator:
         # Signal (un seul, générique — la paire est dans le snapshot)
         self._signal = ScalpingSignalEngine(config=self._cfg)
 
-        # Risk
-        if self._exchange_cfg.futures:
-            self._risk = FuturesRiskController(config=self._cfg, db_path="icarus_risk.db")
-        else:
-            self._risk = SpotRiskController(config=self._cfg, db_path="icarus_risk.db")
+        # Risk (futures-only)
+        self._risk = FuturesRiskController(config=self._cfg, db_path="icarus_risk.db")
 
-        # Execution
-        if self._exchange_cfg.futures:
-            self._execution = FuturesExecutionController(
-                config=self._cfg,
-                exchange_cfg=self._exchange_cfg,
-            )
-        else:
-            self._execution = SpotExecutionController(
-                config=self._cfg,
-                exchange_cfg=self._exchange_cfg,
-            )
+        # Execution (futures-only)
+        self._execution = FuturesExecutionController(
+            config=self._cfg,
+            exchange_cfg=self._exchange_cfg,
+        )
 
         # Health (avec le premier data provider pour l'interface)
         # Note: le health monitor sera étendu pour vérifier tous les providers
@@ -206,7 +197,7 @@ class Orchestrator:
 
         # 4. Démarrage du bot Telegram (sender worker + poller)
         if self._telegram:
-            await self._telegram.start()
+            await self._telegram.start_bot()
 
         # 5. Notification startup Telegram
         self._notify_startup()

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Quick backtest runner using existing SOL/USDT data."""
+"""Quick backtest runner using existing SOL/USDT data.
+
+LEGACY / SPOT-ONLY — Ce script utilise le BacktestEngine spot (icarus.backtest.engine).
+Il n'est PAS utilisé par le pipeline futures actuel.
+Pour le backtesting futures, utilisez run_backtest_futures.py.
+"""
 
 import sys
 import logging

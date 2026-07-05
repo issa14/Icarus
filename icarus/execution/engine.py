@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class SpotExecutionController(ExecutionEngineInterface):
-    """Moteur d'exécution spot pour le scalping.
+    """Moteur d'exécution de base pour le scalping futures.
 
     Parameters
     ----------
@@ -236,7 +236,7 @@ class SpotExecutionController(ExecutionEngineInterface):
                 "apiKey": self._exchange_cfg.api_key,
                 "secret": self._exchange_cfg.api_secret,
                 "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
+                "options": {"defaultType": "future"},
             })
             if self._exchange_cfg.sandbox:
                 self._exchange.set_sandbox_mode(True)

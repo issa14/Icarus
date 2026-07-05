@@ -1,13 +1,13 @@
 """icarus.backtest — Backtesting framework for Icarus strategies.
 
 Exports:
-    BacktestEngine            — Spot backtest engine
-    BacktestResult            — Spot backtest result
+    BacktestEngine            — Backtest engine
+    BacktestResult            — Backtest result
     FuturesBacktestEngine     — Futures backtest engine (leverage, margin, liquidation)
     FuturesBacktestResult     — Futures backtest result
     compute_metrics           — Pure metrics computation
     optimizer_score           — Composite scoring function
-    grid_search_spot          — Grid search for spot mode
+    grid_search_spot          — Grid search (legacy spot mode)
     grid_search_futures       — Grid search for futures mode
 """
 

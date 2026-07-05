@@ -55,13 +55,20 @@ class BinanceDataProvider(DataProvider):
         buffer_size: int = 200,
         event_bus: Optional[EventBus] = None,
         stale_timeout: float = 30.0,
+        futures: bool = True,
+        sandbox: bool = False,
     ):
         self._symbol_raw = symbol
         self._symbol_ws = symbol.replace("/", "").lower()
+        self._futures = futures
+        self._sandbox = sandbox
 
-        # URLs WebSocket Binance (publiques, pas besoin d'API key)
-        self._kline_url = f"wss://stream.binance.com:9443/ws/{self._symbol_ws}@kline_1m"
-        self._depth_url = f"wss://stream.binance.com:9443/ws/{self._symbol_ws}@depth10@100ms"
+        # URLs WebSocket Binance — construites dynamiquement selon le marché
+        self._kline_url = self._build_ws_url(f"{self._symbol_ws}@kline_1m")
+        self._depth_url = self._build_ws_url(f"{self._symbol_ws}@depth10@100ms")
+
+        logger.debug(f"[BinanceDataProvider] Kline URL: {self._kline_url}")
+        logger.debug(f"[BinanceDataProvider] Depth URL: {self._depth_url}")
 
         # Buffer de bougies (thread-safe)
         self.buffer = OhlcvBuffer(maxlen=buffer_size)
@@ -91,6 +98,32 @@ class BinanceDataProvider(DataProvider):
             message="Non démarré",
             since=time.time(),
         )
+
+    # ═════════════════════════════════════════════════════════════════════
+    # URL Construction
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _build_ws_url(self, stream_name: str) -> str:
+        """Construit l'URL WebSocket Binance pour les marchés futures USDS-M.
+
+        Parameters
+        ----------
+        stream_name: str
+            Nom du flux (ex: "btcusdt@kline_1m").
+
+        Returns
+        -------
+        URL WebSocket complète.
+        """
+        if self._futures and self._sandbox:
+            # Futures Demo Trading (testnet)
+            return f"wss://demo-fstream.binance.com/ws/{stream_name}"
+        elif self._futures:
+            # Futures USDS-M production
+            return f"wss://fstream.binance.com/ws/{stream_name}"
+        else:
+            # Spot market (legacy fallback, non utilisé par défaut)
+            return f"wss://stream.binance.com:9443/ws/{stream_name}"
 
     # ═════════════════════════════════════════════════════════════════════
     # Implémentation de DataProvider
@@ -169,7 +202,7 @@ class BinanceDataProvider(DataProvider):
         retry_delay = 1.0
         while not self._stop_event.is_set():
             try:
-                async with websockets.connect(self._kline_url) as ws:
+                async with websockets.connect(self._kline_url, open_timeout=20) as ws:
                     logger.info(f"[BinanceDataProvider] Connecté au flux Kline pour {self._symbol_ws}")
                     retry_delay = 1.0  # reset après connexion réussie
                     self._connected = True
@@ -208,7 +241,7 @@ class BinanceDataProvider(DataProvider):
         retry_delay = 1.0
         while not self._stop_event.is_set():
             try:
-                async with websockets.connect(self._depth_url) as ws:
+                async with websockets.connect(self._depth_url, open_timeout=20) as ws:
                     logger.info(f"[BinanceDataProvider] Connecté au flux Depth pour {self._symbol_ws}")
                     retry_delay = 1.0
 

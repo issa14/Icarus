@@ -1,8 +1,8 @@
-# 🤖 Icarus v2 — Bot de Scalping Intraday Multi-paires
+# 🤖 Icarus v3.1 — Bot de Scalping Intraday Futures (USDS-M)
 
-**Capital cible : 100$** | **Exchange : Binance Spot & Futures** | **Timeframe : 1m**
+**Capital cible : 100$** | **Exchange : Binance Futures (USDS-M)** | **Timeframe : 1m**
 
-Bot de trading algorithmique 100% automatisé spécialisé dans le **scalping intraday**. Architecture modulaire, validation Pydantic, multi-paires intelligent, notifications Telegram, gestion Kelly du risque, support **Spot et Futures** avec factory pattern, backtesting intégré et détection de marché rangeant.
+Bot de trading algorithmique 100% automatisé spécialisé dans le **scalping intraday sur Futures**. Architecture modulaire, validation Pydantic, multi-paires intelligent, notifications Telegram, gestion Kelly du risque. **100% Futures (USDS-M)** — le mode Spot a été définitivement retiré en v3.1. Backtesting intégré, grid search optimizer, et détection de marché rangeant.
 
 ---
 
@@ -18,8 +18,8 @@ Bot de trading algorithmique 100% automatisé spécialisé dans le **scalping in
           │    Orchestrateur         │
           │  (icarus/orchestrator)  │
           │                         │
-          │  • Factory Pattern      │
-          │    Spot ↔ Futures       │
+          │  • Futures-only         │
+          │    USDS-M uniquement    │
           │  • Choisit la meilleure │
           │    paire parmi N        │
           │  • Injections DI        │
@@ -30,7 +30,6 @@ Bot de trading algorithmique 100% automatisé spécialisé dans le **scalping in
     │  Data      │ │Signal│ │ Execution   │
     │  Providers │ │Engine│ │ Controller  │
     │  (N paires)│ │      │ │             │
-    │            │ │      │ │ • Spot      │
     │            │ │      │ │ • Futures   │
     └────────────┘ └──┬───┘ └─────────────┘
              │        │
@@ -43,7 +42,7 @@ Bot de trading algorithmique 100% automatisé spécialisé dans le **scalping in
 
     ┌─────────────────────┐
     │  Backtesting         │
-    │  • Spot Engine       │
+    │  • Backtest Engine   │
     │  • Futures Engine    │
     │  • Grid Search       │
     │  • Métriques         │
@@ -58,11 +57,11 @@ Bot de trading algorithmique 100% automatisé spécialisé dans le **scalping in
 | **config** | `models.py`, `loader.py` | Validation Pydantic, chargement YAML |
 | **data** | `buffer.py`, `stream.py` | Ring buffer OHLCV, WebSocket Binance (Kline + Depth) |
 | **signal** | `indicators.py`, `scoring.py`, `engine.py`, `market_state.py` | RSI, ATR, volume surge, score multi-critères, **détection marché rangeant** |
-| **risk** | `engine.py` (Spot), `futures.py` (Futures) | Kelly fractionnel, circuit breaker, sizing, liquidation check |
-| **execution** | `engine.py` (Spot), `futures.py` (Futures) | Ordres limit/market, SL/TP, trailing stop, leverage, reduce-only |
-| **backtest** | `engine.py`, `futures_engine.py`, `metrics.py`, `optimizer.py` | Backtesting Spot & Futures, grid search, métriques avancées |
+| **risk** | `engine.py`, `futures.py` | Kelly fractionnel, circuit breaker, sizing, liquidation check |
+| **execution** | `engine.py`, `futures.py` | Ordres limit/market, SL/TP, trailing stop, leverage, reduce-only |
+| **backtest** | `engine.py`, `futures_engine.py`, `metrics.py`, `optimizer.py` | Backtesting Futures & Legacy, grid search, métriques avancées |
 | **monitoring** | `health.py`, `dashboard.py`, `telegram.py` | Health checks, dashboard ANSI temps réel, notifications Telegram |
-| **orchestrator.py** | → | Cœur du bot, coordination multi-paires, factory Spot/Futures |
+| **orchestrator.py** | → | Cœur du bot, coordination multi-paires, futures-only |
 
 ---
 
@@ -70,7 +69,7 @@ Bot de trading algorithmique 100% automatisé spécialisé dans le **scalping in
 
 ```bash
 # 1. Cloner le repo
-git clone <repo-url>
+git clone https://github.com/issa14/Icarus.git
 cd Icarus
 
 # 2. Créer un virtualenv (optionnel mais recommandé)
@@ -115,24 +114,24 @@ python main.py
 # 4. Lancer la boucle de trading (scan toutes les 5s)
 ```
 
-### Mode Futures
+### Mode Futures (le seul disponible)
 
 ```bash
-# 1. Configurer config.yaml avec futures: true
-#    exchange.futures = true
+# 1. Configurer config.yaml — le mode Futures est le seul supporté.
 #    scalping.leverage = 1-125
 #    scalping.margin_mode = "cross" | "isolated"
 
-# 2. Lancer en mode Futures
+# 2. Lancer
 python main.py
 
 # Mode Demo Trading (sandbox Futures)
 #    exchange.sandbox = true
-#    exchange.futures = true
 #    → Demo trading activé automatiquement (demo-fapi.binance.com)
 ```
 
-Voir [QUICK_START_FUTURES.md](./QUICK_START_FUTURES.md) pour le guide complet de migration Spot → Futures.
+> ⚠️ **Note v3.1** : Le mode Spot a été définitivement retiré. Icarus est désormais **100% Futures (USDS-M)**.  
+> Le flag `exchange.futures` n'existe plus — le bot est implicitement Futures.  
+> Voir [QUICK_START_FUTURES.md](./QUICK_START_FUTURES.md) pour le guide de démarrage.
 
 ---
 
@@ -149,18 +148,17 @@ symbols:
 
 Le bot scanne **toutes les paires simultanément** et ne trade que la meilleure opportunité. 1 seul trade à la fois.
 
-### Mode Spot vs Futures
+### Configuration Futures (100% Futures)
 
 ```yaml
-exchange:
-  futures: false     # false = Spot (défaut), true = Futures
-
 scalping:
-  # Paramètres Futures (ignorés si exchange.futures = false)
+  # Paramètres Futures — toujours actifs
   leverage: 5           # 1 à 125
   margin_mode: isolated # "cross" ou "isolated"
   hedge_mode: false     # Mode hedge Binance
 ```
+
+> ℹ️ Le flag `exchange.futures` a été supprimé en v3.1. Le mode est implicitement Futures.
 
 ### Paramètres des ordres (optimisés scalping 1m)
 
@@ -209,15 +207,7 @@ Avantages :
 
 ## 🧪 Backtesting
 
-Le framework de backtesting supporte les modes **Spot** et **Futures** avec moteurs dédiés.
-
-### Backtest Spot
-
-```bash
-python run_backtest.py
-```
-
-Utilise le `BacktestEngine` pour simuler la stratégie sur données historiques OHLCV.
+Le framework de backtesting supporte le mode **Futures** (moteur principal) et un mode **legacy** (sans liquidation).
 
 ### Backtest Futures
 
@@ -230,7 +220,8 @@ Utilise le `FuturesBacktestEngine` avec support du leverage, marge, liquidation 
 ### Optimisation de paramètres (Grid Search)
 
 ```bash
-python run_optimizer_oos.py
+# Grid search Futures (recommandé)
+python -m icarus.backtest.optimizer --futures
 ```
 
 Grid search sur les paramètres clés (RSI, seuils, TP/SL) avec métrique composite.
@@ -239,10 +230,10 @@ Grid search sur les paramètres clés (RSI, seuils, TP/SL) avec métrique compos
 
 | Fichier | Rôle |
 |---------|------|
-| `icarus/backtest/engine.py` | Moteur Spot (simulation bougie par bougie) |
+| `icarus/backtest/engine.py` | Moteur legacy (simulation bougie par bougie) |
 | `icarus/backtest/futures_engine.py` | Moteur Futures (leverage, marge, liquidation) |
 | `icarus/backtest/metrics.py` | Calcul métriques (Sharpe, drawdown, win rate, etc.) |
-| `icarus/backtest/optimizer.py` | Grid search Spot & Futures, scoring composite |
+| `icarus/backtest/optimizer.py` | Grid search Futures & Legacy, scoring composite |
 
 ---
 
@@ -355,13 +346,13 @@ telegram:
 - [x] Indicateurs : RSI, ATR, volume surge, spread
 - [x] Scoring multi-critères pondéré
 - [x] **Détection de marché rangeant** (anti-range filter)
-- [x] **Support Futures** : SpotExecutionController + FuturesExecutionController
+- [x] **Support Futures** : FuturesExecutionController (100% USDS-M)
 - [x] **Risk Futures** : Kelly fractionnel avec marge, liquidation check
-- [x] **Factory Pattern** : sélection automatique Spot/Futures via config
+- [x] **Futures-only** : mode Spot retiré en v3.1, code simplifié
 - [x] **Demo Trading Futures** (demo-fapi.binance.com)
-- [x] **Backtesting Spot** : simulation bougie par bougie
+- [x] **Backtesting** : simulation bougie par bougie
 - [x] **Backtesting Futures** : leverage, marge, liquidation
-- [x] **Grid Search** : optimisation paramètres Spot & Futures
+- [x] **Grid Search** : optimisation paramètres Futures & Legacy
 - [x] **Métriques avancées** : Sharpe, drawdown, profit factor, etc.
 - [x] Gestion des risques : Kelly fractionnel, circuit breaker, cooldown
 - [x] Execution engine : ordres limit, SL/TP, trailing stop
@@ -372,7 +363,7 @@ telegram:
 - [x] EventBus (pub/sub) prêt pour extension
 - [x] Injection de dépendances (modules interchangeables)
 - [x] `.gitignore` : config.yaml, bases SQLite, logs exclus
-- [x] Tests unitaires : factory Spot/Futures, orchestrateur, métriques backtest
+- [x] Tests unitaires : métriques backtest
 - [x] Script de téléchargement de données historiques
 
 ## 🔜 Ce qui reste à faire
@@ -407,13 +398,13 @@ Icarus/
 ├── requirements.txt              # Dépendances Python
 ├── README.md                     # ← Ce fichier
 ├── QUICK_START_FUTURES.md        # Guide démarrage Futures
-├── MIGRATION_FUTURES.md          # Détails migration Spot → Futures
+├── MIGRATION_FUTURES.md          # Détails migration Spot → Futures (v3.0)
 ├── .gitignore
 │
-├── run_backtest.py               # Lancement backtest Spot
+├── run_backtest.py               # Lancement backtest Legacy
 ├── run_backtest_futures.py       # Lancement backtest Futures
 ├── run_optimizer_oos.py          # Grid search paramètres
-├── validate_migration.py         # Validation migration Spot/Futures
+├── validate_migration.py         # Script de validation migration (v3.0)
 │
 ├── tests/
 │   └── test_backtest_metrics.py  # Tests unitaires métriques backtest
@@ -422,7 +413,7 @@ Icarus/
 │   └── download_data.py          # Téléchargement données historiques
 │
 └── icarus/
-    ├── orchestrator.py           # Cœur du bot (coordination multi-paires, factory)
+    ├── orchestrator.py           # Cœur du bot (coordination multi-paires, futures-only)
 
     ├── core/
     │   ├── __init__.py
@@ -432,13 +423,13 @@ Icarus/
 
     ├── config/
     │   ├── __init__.py
-    │   ├── models.py             # Modèles Pydantic (validation, support Futures)
+    │   ├── models.py             # Modèles Pydantic (validation, 100% Futures)
     │   └── loader.py             # Chargement YAML
 
     ├── data/
     │   ├── __init__.py
     │   ├── buffer.py             # Ring buffer OHLCV
-    │   └── stream.py             # BinanceDataProvider (WebSocket)
+    │   └── stream.py             # BinanceDataProvider (WebSocket futures)
 
     ├── signal/
     │   ├── __init__.py
@@ -449,20 +440,20 @@ Icarus/
 
     ├── risk/
     │   ├── __init__.py
-    │   ├── engine.py             # SpotRiskController (Kelly, circuit breaker)
+    │   ├── engine.py             # RiskController de base (Kelly, circuit breaker)
     │   └── futures.py            # FuturesRiskController (marge, liquidation)
 
     ├── execution/
     │   ├── __init__.py
-    │   ├── engine.py             # SpotExecutionController (ordres, SL/TP)
+    │   ├── engine.py             # ExecutionController de base (ordres, SL/TP)
     │   └── futures.py            # FuturesExecutionController (leverage, reduce-only)
 
     ├── backtest/
     │   ├── __init__.py
-    │   ├── engine.py             # BacktestEngine & BacktestResult (Spot)
+    │   ├── engine.py             # BacktestEngine & BacktestResult (legacy)
     │   ├── futures_engine.py     # FuturesBacktestEngine & FuturesBacktestResult
     │   ├── metrics.py            # compute_metrics (Sharpe, drawdown, etc.)
-    │   └── optimizer.py          # Grid search Spot & Futures
+    │   └── optimizer.py          # Grid search Futures & Legacy
 
     ├── monitoring/
     │   ├── __init__.py
@@ -487,7 +478,7 @@ Commencez toujours en **sandbox/demo trading** (`sandbox: true`) avant de passer
 ## 📚 Documentation supplémentaire
 
 - **[QUICK_START_FUTURES.md](./QUICK_START_FUTURES.md)** — Guide de démarrage rapide Futures, FAQ, checklist sécurité
-- **[MIGRATION_FUTURES.md](./MIGRATION_FUTURES.md)** — Détails techniques de la migration Spot → Futures
+- **[MIGRATION_FUTURES.md](./MIGRATION_FUTURES.md)** — Détails techniques de la migration Spot → Futures (v3.0)
 
 ---
 

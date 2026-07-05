@@ -8,7 +8,6 @@ Aucune valeur par défaut cachée — tout est explicite et documenté.
 
 from __future__ import annotations
 
-import warnings
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional
 
@@ -18,31 +17,16 @@ from typing import List, Optional
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ExchangeConfig(BaseModel):
-    """Configuration de connexion à l'exchange (CCXT)."""
+    """Configuration de connexion à l'exchange (CCXT).
+
+    Ce déploiement d'Icarus est futures-only (USDS-M).  Le mode spot
+    a été définitivement retiré.  Les URLs WebSocket, la logique
+    d'exécution et le sizing sont tous conçus pour les futures.
+    """
     exchange:   str   = Field(default="binance", description="Nom de l'exchange CCXT")
     api_key:    str   = Field(default="", description="Clé API (vide = mode public)")
     api_secret: str   = Field(default="", description="Secret API (vide = mode public)")
     sandbox:    bool  = Field(default=False, description="Utiliser le testnet si disponible")
-    futures:    bool  = Field(default=True, description="Utiliser les marchés futures de l'exchange. OBLIGATOIRE pour Binance — ce bot ne supporte que les futures.")
-
-    @model_validator(mode="after")
-    def check_futures_only(self) -> "ExchangeConfig":
-        """Lève un warning si le mode spot est explicitement demandé sur Binance.
-
-        Ce déploiement d'Icarus est futures-only. Les URLs WebSocket, la
-        logique d'exécution et le sizing sont tous conçus pour les futures
-        USDS-M.  Le mode spot n'est pas fonctionnel et ne doit pas être
-        utilisé sans revue complète du code.
-        """
-        if self.futures is False and self.exchange.lower() == "binance":
-            warnings.warn(
-                "⚠️  ExchangeConfig.futures=False avec exchange=binance. "
-                "Ce déploiement d'Icarus est futures-only (USDS-M). "
-                "Les flux WebSocket, l'exécution d'ordres et le sizing "
-                "ne sont pas testés en mode spot. ATTENDU: futures=True.",
-                UserWarning,
-            )
-        return self
 
 
 class DatabaseConfig(BaseModel):

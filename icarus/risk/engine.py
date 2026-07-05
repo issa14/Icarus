@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 class SpotRiskController(RiskEngineInterface):
-    """Contrôleur de risque spot pour le scalping.
+    """Contrôleur de risque pour le scalping futures.
 
     Parameters
     ----------

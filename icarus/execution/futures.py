@@ -100,6 +100,28 @@ class FuturesExecutionController(SpotExecutionController):
 
         loop = asyncio.get_running_loop()
         for symbol in self._config.symbols:
+            # ═════════════════════════════════════════════════════════════
+            # Auto-cleanup des ordres ouverts résiduels (sandbox uniquement).
+            # En production réelle, on ne touche JAMAIS aux ordres existants
+            # sans confirmation explicite — sécurité absolue.
+            # ═════════════════════════════════════════════════════════════
+            if self._exchange_cfg.sandbox:
+                try:
+                    cancelled = await loop.run_in_executor(
+                        None,
+                        lambda: self._exchange.cancel_all_orders(symbol),
+                    )
+                    if cancelled:
+                        logger.info(
+                            f"[FuturesExecutionController] {symbol}: {len(cancelled)} ordre(s) "
+                            f"annulé(s) avant reconfiguration (sandbox cleanup)."
+                        )
+                except Exception as cancel_exc:
+                    logger.debug(
+                        f"[FuturesExecutionController] {symbol}: pas d'ordres à annuler "
+                        f"ou échec annulation: {cancel_exc}"
+                    )
+
             try:
                 await loop.run_in_executor(
                     None,
@@ -115,7 +137,15 @@ class FuturesExecutionController(SpotExecutionController):
                 )
             except Exception as exc:
                 error_msg = str(exc)
-                if "testnet" in error_msg.lower() or "sandbox" in error_msg.lower():
+                # -4067 : position/ordre existant empêche le changement de margin mode.
+                # Ce n'est pas une erreur fatale, le mode actuel est conservé.
+                if "-4067" in error_msg:
+                    logger.info(
+                        f"[FuturesExecutionController] Impossible de changer le margin mode "
+                        f"pour {symbol} : une position ou un ordre existe déjà. "
+                        f"Le mode actuel du compte est conservé."
+                    )
+                elif "testnet" in error_msg.lower() or "sandbox" in error_msg.lower():
                     logger.warning(
                         f"[FuturesExecutionController] Le testnet/sandbox Binance futures est déprécié. "
                         f"Si vous utilisez Binance, passez en mode demo (consultez la doc). "
