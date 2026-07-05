@@ -39,11 +39,13 @@ print("""
   • Factory Pattern: Orchestrator auto-selects Spot or Futures controller
   • Backward Compatibility: Old code still works with aliases
 
-🆕  2026-07-05: Demo Trading Binance Futures
+ 🆕  2026-07-05: Demo Trading Binance Futures
   • Binance testnet/sandbox is DEPRECATED for futures
-  • The bot now auto-switches to DEMO TRADING (demo-fapi.binance.com)
+  • The bot now uses CCXT's native enable_demo_trading(True) method
+  • This sets the enableDemoTrading flag AND redirects all URLs
+    (fapi/dapi/spot → demo-*.binance.com) correctly
   • Set sandbox: true + futures: true → demo trading is activated
-  • Works with your Binance API credentials on the demo network
+  • Requires API keys generated on https://demo.binance.com
 
 
 🚀 QUICK START
@@ -100,7 +102,7 @@ print("""
    The bot will now trade Futures on the demo network! 🎯
 
    Check logs to confirm:
-   - "[FuturesExecutionController] Demo trading Binance activé..."
+   - "[FuturesExecutionController] Demo trading Binance activé via enable_demo_trading() natif CCXT."
    - "[FuturesExecutionController] SOL/USDT: leverage=1, margin_mode=isolated"
 
 
@@ -149,7 +151,7 @@ While bot is running, check logs:
   $ tail -f icarus.log
 
   Look for messages like:
-  - "[FuturesExecutionController] Demo trading Binance activé..."
+  - "[FuturesExecutionController] Demo trading Binance activé via enable_demo_trading() natif CCXT."
   - "[FuturesExecutionController] Exchange binance initialisé en futures."
   - "[FuturesRiskController] Signal validé..."
 
@@ -196,7 +198,7 @@ Q: How do I know if Futures mode is active?
 A: Check logs:
    • Spot: "[ExecutionController] Exchange..."
    • Futures: "[FuturesExecutionController] Exchange... initialisé en futures."
-   • Futures Demo: "[FuturesExecutionController] Demo trading Binance activé..."
+   • Futures Demo: "[FuturesExecutionController] Demo trading Binance activé via enable_demo_trading() natif CCXT."
 
 Q: Can I switch back to Spot?
 A: Yes! Just set exchange.futures: false and restart.
@@ -207,8 +209,10 @@ A: Binance deprecated the old testnet for futures. Icarus now uses the
    sandbox: true + futures: true. No configuration changes needed!
 
 Q: Do I need special API keys for demo trading?
-A: No — use the same Binance API keys. The demo network is isolated
-   from the real market, so your real funds are never at risk.
+A: Yes — you must generate API keys on https://demo.binance.com.
+   The demo environment is completely isolated from the real Binance
+   platform. Production Binance API keys will NOT work on the demo
+   network and will produce an "Invalid Api-Key ID" error.
 
 Q: What's the risk management?
 A: • Daily loss limit (circuit breaker)

@@ -223,7 +223,8 @@ python main.py --generate-config config.new.yaml
 ## Prochaines Étapes (Optionnel)
 
 1. **Backtesting**: Valider rentabilité mode Futures vs Spot
-2. **Sandbox**: Tester avec Binance Testnet futures
+2. **Sandbox**: Tester avec Binance Futures Demo Trading (sandbox: true + futures: true)
+   → Le testnet public est déprécié ; utilisez les clés API générées sur https://demo.binance.com
 3. **Monitoring**: Dashboard affiche mode actuel (Spot/Futures)
 4. **Documentation**: Ajouter exemples stratégie futures
 

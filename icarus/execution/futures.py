@@ -36,15 +36,29 @@ class FuturesExecutionController(SpotExecutionController):
             logger.info(f"[FuturesExecutionController] Exchange {exchange_name} initialisé en futures.")
 
     def _enable_demo_trading(self, exchange_name: str) -> None:
-        """Active le demo trading Binance Futures (demo-fapi.binance.com).
+        """Active le demo trading via la méthode native CCXT enable_demo_trading().
 
-        Binance a déprécié le testnet public pour les futures.  Les clés API
-        générées sur https://demo.binance.com fonctionnent avec les endpoints
-        demo-fapi.binance.com / demo-dapi.binance.com.
+        **Root cause du bug -2008 "Invalid Api-Key ID"** :
+        L'ancienne approche (substitution manuelle des URLs fapi/dapi vers les
+        hosts demo-*.binance.com) redirigeait bien les requêtes futures, mais
+        ne positionnait **pas** le flag interne
+        ``self._exchange.options['enableDemoTrading'] = True``.
 
-        Plutôt que de mapper les clés du dict CCXT 'demo' (qui peut être
-        incomplet ou varier entre versions), on fait une substitution par
-        nom d'hôte sur toutes les URLs futures.  C'est plus robuste.
+        Or CCXT, dès le premier appel privé (set_leverage, set_margin_mode,
+        ordre, etc.), appelle implicitement load_markets() → fetch_currencies().
+        Le code source de fetch_currencies() dans ccxt/binance.py contient :
+
+            if self.safe_bool(self.options, 'enableDemoTrading', False):
+                return {}
+
+        Sans ce flag à True, CCXT tape sur l'endpoint SPOT PRODUCTION
+        https://api.binance.com/sapi/v1/capital/config/getall, où la clé API
+        demo n'existe pas → erreur -2008.
+
+        La méthode native ``exchange.enable_demo_trading(True)`` (CCXT >= 4.x)
+        fait les deux choses correctement :
+        1. Redirige les URLs (fapi/dapi/spot → demo-*.binance.com)
+        2. Positionne ``options['enableDemoTrading'] = True``
         """
         if exchange_name.lower() != "binance":
             try:
@@ -59,32 +73,25 @@ class FuturesExecutionController(SpotExecutionController):
                 )
             return
 
-        # Binance Futures : remplacer les hosts de production par les hosts demo
-        substitutions = {
-            "fapi.binance.com": "demo-fapi.binance.com",
-            "dapi.binance.com": "demo-dapi.binance.com",
-        }
-
-        api_urls = self._exchange.urls.get("api", {})
-        overridden = 0
-        for key, url in list(api_urls.items()):
-            for prod_host, demo_host in substitutions.items():
-                if prod_host in url:
-                    api_urls[key] = url.replace(prod_host, demo_host)
-                    overridden += 1
-                    break
-
-        if overridden > 0:
+        # Binance Futures : utiliser la méthode native CCXT
+        try:
+            self._exchange.enable_demo_trading(True)
             logger.info(
                 "[FuturesExecutionController] Demo trading Binance activé "
-                f"({overridden} endpoints redirigés vers demo-*.binance.com)."
+                "via enable_demo_trading() natif CCXT."
             )
-        else:
-            logger.warning(
-                "[FuturesExecutionController] Aucun endpoint Binance futures "
-                "trouvé dans les URLs — le demo trading pourrait ne pas "
-                "fonctionner.  Vérifiez votre version de CCXT."
+        except AttributeError:
+            logger.error(
+                "[FuturesExecutionController] La version de CCXT installée ne "
+                "supporte pas enable_demo_trading().  Mettez à jour avec : "
+                "pip install -U ccxt"
             )
+            raise
+        except Exception as exc:
+            logger.error(
+                f"[FuturesExecutionController] Échec de enable_demo_trading() : {exc}"
+            )
+            raise
 
     async def initialize_futures_account(self) -> None:
         """Configure le levier et le mode de marge une fois l'exchange initialisé."""
