@@ -1,14 +1,4 @@
-"""icarus.risk.engine — Contrôleur de risque implémentant l'interface RiskEngine.
-
-Refactor depuis risk_controller.py :
-  • Implémente l'interface RiskEngine (ABC).
-  • Utilise les dataclasses du core (PositionSize, ValidatedSignal, ClosedTrade).
-  • Kelly fractionnaire adaptatif basé sur le win rate historique.
-  • Circuit breaker avec halt temporaire sur pertes consécutives.
-  • Persistance SQLite pour l'historique des trades et le PnL quotidien.
-
-═══════════════════════════════════════════════════════════════════════════════
-"""
+"""Contrôleur de risque futures pour le bot Icarus."""
 
 from __future__ import annotations
 
@@ -18,8 +8,6 @@ import time
 from collections import deque
 from datetime import datetime
 from typing import Deque, Dict, List, Optional, Tuple
-
-import numpy as np
 
 from icarus.config.models import ScalpingConfig
 from icarus.core.interfaces import RiskEngine as RiskEngineInterface
@@ -37,46 +25,30 @@ from icarus.core.types import (
 logger = logging.getLogger(__name__)
 
 
-class SpotRiskController(RiskEngineInterface):
-    """Contrôleur de risque spot pour le scalping.
-
-    Parameters
-    ----------
-    config: ScalpingConfig
-        Configuration validée.
-    db_path: str
-        Chemin vers la base SQLite (défaut: "icarus_risk.db").
-    """
+class FuturesRiskController(RiskEngineInterface):
+    """Contrôleur de risque pour trading futures."""
 
     def __init__(self, config: ScalpingConfig, db_path: str = "icarus_risk.db"):
         self._config = config
         self._db_path = db_path
 
-        # Paramètres extraits de la config
         self._risk_per_trade = config.risk_per_trade
         self._max_daily_loss = config.max_daily_loss_percent
         self._max_positions = config.max_positions
         self._kelly_fraction = config.kelly_fraction
-        self._target_win_rate = 0.60  # win rate cible pour Kelly a priori
+        self._target_win_rate = 0.60
         self._target_rr = 1.0
 
-        # État en RAM
         self._recent_results: Deque[bool] = deque(maxlen=10)
         self._consecutive_loss_halt_until: float = 0.0
         self._daily_pnl: float = 0.0
         self._day_start_balance: Optional[float] = None
         self._is_halted: bool = False
 
-        # Stats
         self._stats = BotStats()
 
-        # Init DB
         self._init_db()
         self._load_daily_pnl()
-
-    # ═════════════════════════════════════════════════════════════════════
-    # Implémentation de l'interface RiskEngine
-    # ═════════════════════════════════════════════════════════════════════
 
     def validate_and_size(
         self,
@@ -84,15 +56,6 @@ class SpotRiskController(RiskEngineInterface):
         current_balance: float,
         open_positions: int,
     ) -> ValidatedSignal:
-        """Valide un signal et calcule la taille de position.
-
-        Ordre des vérifications :
-        1. Circuit breaker actif ?
-        2. Nombre max de positions atteint ?
-        3. Action valide (BUY/SELL) ?
-        4. Calcul de la taille (Kelly) > 0 ?
-        """
-        # 1. Circuit breaker
         halted, reason = self.check_circuit_breaker(current_balance)
         if halted:
             return ValidatedSignal(
@@ -102,7 +65,6 @@ class SpotRiskController(RiskEngineInterface):
                 is_valid=False,
             )
 
-        # 2. Max positions
         if open_positions >= self._max_positions:
             return ValidatedSignal(
                 signal=signal,
@@ -111,7 +73,6 @@ class SpotRiskController(RiskEngineInterface):
                 is_valid=False,
             )
 
-        # 3. Action valide
         if signal.action.value not in ("BUY", "SELL"):
             return ValidatedSignal(
                 signal=signal,
@@ -120,20 +81,18 @@ class SpotRiskController(RiskEngineInterface):
                 is_valid=False,
             )
 
-        # 4. Calcul de la taille de position (Kelly)
-        pos = self._calculate_kelly_position(current_balance, signal.entry, signal.sl)
-
+        pos = self._calculate_futures_position(current_balance, signal.entry, signal.sl)
         if pos.amount == 0.0:
             return ValidatedSignal(
                 signal=signal,
                 position=pos,
-                reason="Taille de position nulle (Kelly négatif ou trop petit)",
+                reason="Taille de position nulle (Kelly négatif, levier trop élevé ou SL trop serré)",
                 is_valid=False,
             )
 
         logger.info(
-            f"[RiskController] ✅ Signal validé | Taille: {pos.amount} | "
-            f"Risque: {pos.risk_usd:.2f} $ ({pos.risk_pct:.2f}% du capital)"
+            f"[FuturesRiskController] ✅ Signal validé | Taille: {pos.amount} | "
+            f"Risque: {pos.risk_usd:.2f} $ ({pos.risk_pct:.2f}% du capital) | marge: {pos.margin_usd:.2f} $"
         )
 
         return ValidatedSignal(
@@ -144,27 +103,18 @@ class SpotRiskController(RiskEngineInterface):
         )
 
     def check_circuit_breaker(self, current_balance: float) -> Tuple[bool, str]:
-        """Vérifie si un circuit breaker est actif.
-
-        Returns
-        -------
-        (True, raison) si trading bloqué, (False, "") sinon.
-        """
-        # Initialisation du capital du jour si première exécution
         if self._day_start_balance is None:
             self._day_start_balance = current_balance
             self._daily_pnl = 0.0
             self._save_daily_pnl()
-            logger.info(f"[RiskController] Capital initial du jour: {current_balance:.2f} $")
+            logger.info(f"[FuturesRiskController] Capital initial du jour: {current_balance:.2f} $")
             return False, ""
 
-        # Halt temporaire sur pertes consécutives
         now = time.time()
         if self._consecutive_loss_halt_until and now < self._consecutive_loss_halt_until:
             remaining = int(self._consecutive_loss_halt_until - now)
             return True, f"Halt temporaire ({remaining}s restantes)"
 
-        # Perte quotidienne max
         loss_pct = -self._daily_pnl / self._day_start_balance if self._day_start_balance > 0 else 0.0
         if loss_pct >= self._max_daily_loss:
             self._is_halted = True
@@ -174,7 +124,6 @@ class SpotRiskController(RiskEngineInterface):
         return False, ""
 
     def update_pnl(self, pnl: float, *, is_winner: Optional[bool] = None) -> None:
-        """Met à jour le PnL courant après clôture d'un trade."""
         if is_winner is None:
             is_winner = pnl > 0
 
@@ -187,22 +136,16 @@ class SpotRiskController(RiskEngineInterface):
         else:
             self._stats.loss_count += 1
 
-        # Buffer des résultats récents
         self._recent_results.append(bool(is_winner))
-
-        # Détection pertes consécutives
         consecutive = self._count_consecutive_losses()
         if consecutive >= 4:
-            self._consecutive_loss_halt_until = time.time() + 30 * 60  # 30 min
-            logger.warning(
-                f"[RiskController] {consecutive} pertes consécutives → halt 30min"
-            )
+            self._consecutive_loss_halt_until = time.time() + 30 * 60
+            logger.warning(f"[FuturesRiskController] {consecutive} pertes consécutives → halt 30min")
 
         self._save_daily_pnl()
-        logger.info(f"[RiskController] PnL mis à jour: {self._daily_pnl:.2f} $")
+        logger.info(f"[FuturesRiskController] PnL mis à jour: {self._daily_pnl:.2f} $")
 
     def record_trade(self, trade: ClosedTrade) -> None:
-        """Enregistre un trade clôturé dans l'historique persistant."""
         try:
             conn = sqlite3.connect(self._db_path)
             cursor = conn.cursor()
@@ -225,23 +168,16 @@ class SpotRiskController(RiskEngineInterface):
             )
             conn.commit()
             conn.close()
-
-            # Mise à jour du PnL
             self.update_pnl(trade.pnl, is_winner=trade.is_winner)
-            logger.info(
-                f"[RiskController] Trade enregistré: {trade.symbol} {trade.side} | "
-                f"PnL: {trade.pnl:.2f} $ | Win: {trade.is_winner}"
-            )
+            logger.info(f"[FuturesRiskController] Trade enregistré: {trade.symbol} {trade.side} | PnL: {trade.pnl:.2f} $ | Win: {trade.is_winner}")
         except Exception as e:
-            logger.error(f"[RiskController] Erreur enregistrement trade: {e}")
+            logger.error(f"[FuturesRiskController] Erreur enregistrement trade: {e}")
 
     def get_stats(self) -> BotStats:
-        """Retourne les statistiques de risque."""
         self._stats.daily_pnl = self._daily_pnl
         return self._stats
 
     def get_health(self) -> HealthStatus:
-        """Retourne le statut de santé du RiskEngine."""
         if self._is_halted:
             status = ComponentStatus.DEGRADED
             msg = "Circuit breaker actif"
@@ -250,7 +186,7 @@ class SpotRiskController(RiskEngineInterface):
             msg = f"OK (PnL jour: {self._daily_pnl:+.2f} $)"
 
         return HealthStatus(
-            component="RiskController",
+            component="FuturesRiskController",
             status=status,
             message=msg,
             since=time.time(),
@@ -266,51 +202,31 @@ class SpotRiskController(RiskEngineInterface):
     def max_positions(self) -> int:
         return self._max_positions
 
-    # ═════════════════════════════════════════════════════════════════════
-    # Kelly fractionnaire
-    # ═════════════════════════════════════════════════════════════════════
-
-    def _calculate_kelly_position(
+    def _calculate_futures_position(
         self, balance: float, entry: float, sl: float
     ) -> PositionSize:
-        """Calcule la taille de position optimale (Kelly fractionnaire).
+        if entry <= 0 or sl <= 0 or entry == sl:
+            return PositionSize(0.0, 0.0, 0.0, 0.0, 0.0)
 
-        Parameters
-        ----------
-        balance: float
-            Capital disponible.
-        entry: float
-            Prix d'entrée.
-        sl: float
-            Prix du stop-loss.
-
-        Returns
-        -------
-        PositionSize
-        """
         win_rate = self._get_dynamic_win_rate()
         kelly_full = (win_rate * self._target_rr - (1 - win_rate)) / self._target_rr
         kelly_full = max(0.0, kelly_full)
         kelly_used = kelly_full * self._kelly_fraction
 
-        max_capital_to_risk = balance * kelly_used
+        max_risk_usd = balance * kelly_used
         risk_per_unit = abs(entry - sl)
+        amount = max_risk_usd / risk_per_unit if risk_per_unit > 0 else 0.0
 
-        if risk_per_unit == 0:
+        margin = amount * entry / self._config.leverage
+        if margin <= 0 or margin > balance:
             return PositionSize(0.0, 0.0, 0.0, 0.0, 0.0)
 
-        amount = max_capital_to_risk / risk_per_unit
-
-        # Plafonnement : exposition max 20% du capital
-        max_exposure = balance * 0.20 / entry
-        amount = min(amount, max_exposure)
-
-        # Arrondi à 3 décimales
-        amount = round(amount, 3)
-
-        # Taille minimale
         if amount < 0.001:
-            logger.warning("[RiskController] Taille de position trop petite (<0.001), trade ignoré.")
+            logger.warning("[FuturesRiskController] Taille de position trop petite (<0.001), trade ignoré.")
+            return PositionSize(0.0, 0.0, 0.0, 0.0, 0.0)
+
+        if abs(entry - sl) * 1.5 >= abs(entry - self._estimate_liquidation(entry, sl)):
+            logger.warning("[FuturesRiskController] SL trop proche de la liquidation, trade rejeté.")
             return PositionSize(0.0, 0.0, 0.0, 0.0, 0.0)
 
         exposure = amount * entry
@@ -318,15 +234,23 @@ class SpotRiskController(RiskEngineInterface):
         risk_pct = (risk_usd / balance) * 100 if balance > 0 else 0.0
 
         return PositionSize(
-            amount=amount,
+            amount=round(amount, 3),
             exposure_usd=exposure,
             risk_usd=risk_usd,
             risk_pct=risk_pct,
             kelly_fraction=kelly_used,
+            margin_usd=margin,
         )
 
+    def _estimate_liquidation(self, entry: float, sl: float) -> float:
+        # Estimation simplifiée : la liquidation réelle dépendra de l'exchange.
+        if self._config.leverage <= 1:
+            return sl
+        if entry > sl:
+            return entry - (entry / self._config.leverage) * 0.98
+        return entry + (entry / self._config.leverage) * 0.98
+
     def _get_dynamic_win_rate(self) -> float:
-        """Retourne un win rate dynamique (mix bayésien observé/prior)."""
         try:
             conn = sqlite3.connect(self._db_path)
             cursor = conn.cursor()
@@ -346,12 +270,11 @@ class SpotRiskController(RiskEngineInterface):
                 observed = row[1] / row[0] if row[0] > 0 else 0.0
                 return 0.7 * observed + 0.3 * self._target_win_rate
         except Exception as e:
-            logger.warning(f"[RiskController] Erreur lecture win rate: {e}")
+            logger.warning(f"[FuturesRiskController] Erreur lecture win rate: {e}")
 
         return self._target_win_rate
 
     def _count_consecutive_losses(self) -> int:
-        """Compte le nombre de pertes consécutives récentes."""
         cnt = 0
         for v in reversed(self._recent_results):
             if not v:
@@ -360,15 +283,9 @@ class SpotRiskController(RiskEngineInterface):
                 break
         return cnt
 
-    # ═════════════════════════════════════════════════════════════════════
-    # Persistance
-    # ═════════════════════════════════════════════════════════════════════
-
     def _init_db(self) -> None:
-        """Crée les tables SQLite si nécessaires."""
         conn = sqlite3.connect(self._db_path)
         cursor = conn.cursor()
-
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS daily_pnl (
@@ -380,7 +297,6 @@ class SpotRiskController(RiskEngineInterface):
             )
             """
         )
-
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS trades_history (
@@ -396,13 +312,11 @@ class SpotRiskController(RiskEngineInterface):
             )
             """
         )
-
         conn.commit()
         conn.close()
-        logger.info("[RiskController] Base de données initialisée.")
+        logger.info("[FuturesRiskController] Base de données initialisée.")
 
     def _load_daily_pnl(self) -> None:
-        """Charge le PnL du jour depuis la DB."""
         today = datetime.now().strftime("%Y-%m-%d")
         try:
             conn = sqlite3.connect(self._db_path)
@@ -418,29 +332,26 @@ class SpotRiskController(RiskEngineInterface):
                 self._day_start_balance = row[0]
                 self._daily_pnl = row[1]
                 logger.info(
-                    f"[RiskController] PnL du jour chargé: {self._daily_pnl:.2f} $ "
+                    f"[FuturesRiskController] PnL du jour chargé: {self._daily_pnl:.2f} $ "
                     f"(capital départ: {self._day_start_balance:.2f} $)"
                 )
             else:
                 self._day_start_balance = None
                 self._daily_pnl = 0.0
         except Exception as e:
-            logger.warning(f"[RiskController] Erreur chargement PnL: {e}")
+            logger.warning(f"[FuturesRiskController] Erreur chargement PnL: {e}")
             self._day_start_balance = None
             self._daily_pnl = 0.0
 
     def _save_daily_pnl(self) -> None:
-        """Persiste le PnL du jour."""
         if self._day_start_balance is None:
             return
-
         today = datetime.now().strftime("%Y-%m-%d")
         try:
             conn = sqlite3.connect(self._db_path)
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM daily_pnl WHERE date = ?", (today,))
             exists = cursor.fetchone()
-
             if exists:
                 cursor.execute(
                     "UPDATE daily_pnl SET current_pnl = ?, last_update = CURRENT_TIMESTAMP WHERE date = ?",
@@ -451,8 +362,7 @@ class SpotRiskController(RiskEngineInterface):
                     "INSERT INTO daily_pnl (date, starting_balance, current_pnl) VALUES (?, ?, ?)",
                     (today, self._day_start_balance, self._daily_pnl),
                 )
-
             conn.commit()
             conn.close()
         except Exception as e:
-            logger.warning(f"[RiskController] Erreur sauvegarde PnL: {e}")
+            logger.warning(f"[FuturesRiskController] Erreur sauvegarde PnL: {e}")

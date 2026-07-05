@@ -35,8 +35,8 @@ from icarus.core.types import (
 logger = logging.getLogger(__name__)
 
 
-class ExecutionController(ExecutionEngineInterface):
-    """Moteur d'exécution quantitatif pour le scalping.
+class SpotExecutionController(ExecutionEngineInterface):
+    """Moteur d'exécution spot pour le scalping.
 
     Parameters
     ----------

@@ -16,7 +16,7 @@ scalping:
   # ── Paires tradées ──
   symbols:
     - SOL/USDT
-    - HYPE/USDT
+    - VET/USDT
     - DOGE/USDT
 
   # ── Boucle d'exécution ──
@@ -49,9 +49,12 @@ scalping:
   max_daily_loss_percent: 0.02    # 2% → circuit breaker
   max_positions: 1
   kelly_fraction: 0.15
+  leverage: 1
+  margin_mode: isolated
+  hedge_mode: false
   cooldown_seconds: 180
 
-  # ── Frais (Binance spot) ──
+  # ── Frais (Binance futures) ──
   fee_maker: 0.0002               # 0.02%
   fee_taker: 0.0004               # 0.04%
 
@@ -62,7 +65,11 @@ exchange:
   exchange: binance
   api_key: "VOTRE_API_KEY_BINANCE"
   api_secret: "VOTRE_API_SECRET_BINANCE"
+  # ⚠️  Binance testnet/sandbox est DÉPRÉCIÉ pour les futures.
+  #     Le bot utilise maintenant le DEMO TRADING (demo-fapi.binance.com).
+  #     Laissez sandbox: true pour activer le mode démo.
   sandbox: true
+  futures: true
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Telegram (NOTIFICATIONS)

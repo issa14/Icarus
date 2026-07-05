@@ -22,6 +22,7 @@ class ExchangeConfig(BaseModel):
     api_key:    str   = Field(default="", description="Clé API (vide = mode public)")
     api_secret: str   = Field(default="", description="Secret API (vide = mode public)")
     sandbox:    bool  = Field(default=False, description="Utiliser le testnet si disponible")
+    futures:    bool  = Field(default=False, description="Utiliser les marchés futures de l'exchange")
 
 
 class DatabaseConfig(BaseModel):
@@ -140,6 +141,18 @@ class ScalpingConfig(BaseModel):
         default=0.25, ge=0.01, le=1.0,
         description="Fraction du Kelly full à utiliser (0.25 = 25%)",
     )
+    leverage: int = Field(
+        default=1, ge=1, le=125,
+        description="Levier futures utilisé pour calculer le sizing et la marge engagée",
+    )
+    margin_mode: str = Field(
+        default="isolated",
+        description="Mode de marge futures (cross ou isolated)",
+    )
+    hedge_mode: bool = Field(
+        default=False,
+        description="Activer le mode hedge si pris en charge par l'exchange",
+    )
 
     # ── Cooldown ──
     cooldown_seconds: int = Field(
@@ -176,6 +189,10 @@ class ScalpingConfig(BaseModel):
             raise ValueError(f"min_atr_percent ({self.min_atr_percent}) doit être < max_atr_percent ({self.max_atr_percent})")
         if self.rsi_oversold >= self.rsi_overbought:
             raise ValueError(f"rsi_oversold ({self.rsi_oversold}) doit être < rsi_overbought ({self.rsi_overbought})")
+        if self.margin_mode not in ("cross", "isolated"):
+            raise ValueError(f"margin_mode ({self.margin_mode}) doit être 'cross' ou 'isolated'")
+        if self.leverage < 1:
+            raise ValueError("leverage doit être >= 1")
         return self
 
 

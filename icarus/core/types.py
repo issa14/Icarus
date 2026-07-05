@@ -245,6 +245,7 @@ class PositionSize:
     risk_usd:        float   # amount × |entry - sl|
     risk_pct:        float   # risk_usd / balance × 100
     kelly_fraction:  float   # fraction du Kelly utilisée
+    margin_usd:      float   = 0.0  # marge engagée pour les futures
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +274,7 @@ class OrderRequest:
     tp1:         float
     tp2:         float
     tp1_fraction: float
+    reduce_only: bool = False
     created_at:  float = field(default_factory=time.time)
 
 

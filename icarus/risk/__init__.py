@@ -1,3 +1,6 @@
 """icarus.risk — Gestion du risque et sizing des positions."""
 
-from icarus.risk.engine import RiskController
+from .engine import SpotRiskController
+from .futures import FuturesRiskController
+
+RiskController = SpotRiskController

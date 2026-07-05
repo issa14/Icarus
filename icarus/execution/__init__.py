@@ -1,3 +1,6 @@
 """icarus.execution — Moteur d'exécution des ordres."""
 
-from icarus.execution.engine import ExecutionController
+from .engine import SpotExecutionController
+from .futures import FuturesExecutionController
+
+ExecutionController = SpotExecutionController

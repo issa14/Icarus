@@ -39,11 +39,11 @@ from icarus.core.types import (
     TradingSignal,
 )
 from icarus.data.stream import BinanceDataProvider
-from icarus.execution.engine import ExecutionController
+from icarus.execution import SpotExecutionController, FuturesExecutionController
 from icarus.monitoring.dashboard import Dashboard
 from icarus.monitoring.health import HealthMonitor
 from icarus.monitoring.telegram import TelegramNotifier
-from icarus.risk.engine import RiskController
+from icarus.risk import SpotRiskController, FuturesRiskController
 from icarus.signal.engine import ScalpingSignalEngine
 
 logger = logging.getLogger("Orchestrator")
@@ -101,6 +101,11 @@ class Orchestrator:
     # Initialisation
     # ═════════════════════════════════════════════════════════════════════
 
+    async def _prepare_execution(self) -> None:
+        """Prépare la session futures si l'on trade sur les marchés dérivés."""
+        if self._exchange_cfg.futures and isinstance(self._execution, FuturesExecutionController):
+            await self._execution.initialize_futures_account()
+
     def _init_components(self) -> None:
         """Instancie tous les modules avec injection de dépendances."""
         logger.info("Initialisation des composants...")
@@ -123,13 +128,22 @@ class Orchestrator:
         self._signal = ScalpingSignalEngine(config=self._cfg)
 
         # Risk
-        self._risk = RiskController(config=self._cfg, db_path="icarus_risk.db")
+        if self._exchange_cfg.futures:
+            self._risk = FuturesRiskController(config=self._cfg, db_path="icarus_risk.db")
+        else:
+            self._risk = SpotRiskController(config=self._cfg, db_path="icarus_risk.db")
 
         # Execution
-        self._execution = ExecutionController(
-            config=self._cfg,
-            exchange_cfg=self._exchange_cfg,
-        )
+        if self._exchange_cfg.futures:
+            self._execution = FuturesExecutionController(
+                config=self._cfg,
+                exchange_cfg=self._exchange_cfg,
+            )
+        else:
+            self._execution = SpotExecutionController(
+                config=self._cfg,
+                exchange_cfg=self._exchange_cfg,
+            )
 
         # Health (avec le premier data provider pour l'interface)
         # Note: le health monitor sera étendu pour vérifier tous les providers
@@ -159,6 +173,7 @@ class Orchestrator:
         """Point d'entrée principal. Exécute le cycle de vie complet."""
         # 1. Initialisation
         self._init_components()
+        await self._prepare_execution()
         self._running = True
         self._start_time = time.time()
 
