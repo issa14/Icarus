@@ -8,6 +8,7 @@ Aucune valeur par défaut cachée — tout est explicite et documenté.
 
 from __future__ import annotations
 
+import warnings
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional
 
@@ -22,7 +23,26 @@ class ExchangeConfig(BaseModel):
     api_key:    str   = Field(default="", description="Clé API (vide = mode public)")
     api_secret: str   = Field(default="", description="Secret API (vide = mode public)")
     sandbox:    bool  = Field(default=False, description="Utiliser le testnet si disponible")
-    futures:    bool  = Field(default=False, description="Utiliser les marchés futures de l'exchange")
+    futures:    bool  = Field(default=True, description="Utiliser les marchés futures de l'exchange. OBLIGATOIRE pour Binance — ce bot ne supporte que les futures.")
+
+    @model_validator(mode="after")
+    def check_futures_only(self) -> "ExchangeConfig":
+        """Lève un warning si le mode spot est explicitement demandé sur Binance.
+
+        Ce déploiement d'Icarus est futures-only. Les URLs WebSocket, la
+        logique d'exécution et le sizing sont tous conçus pour les futures
+        USDS-M.  Le mode spot n'est pas fonctionnel et ne doit pas être
+        utilisé sans revue complète du code.
+        """
+        if self.futures is False and self.exchange.lower() == "binance":
+            warnings.warn(
+                "⚠️  ExchangeConfig.futures=False avec exchange=binance. "
+                "Ce déploiement d'Icarus est futures-only (USDS-M). "
+                "Les flux WebSocket, l'exécution d'ordres et le sizing "
+                "ne sont pas testés en mode spot. ATTENDU: futures=True.",
+                UserWarning,
+            )
+        return self
 
 
 class DatabaseConfig(BaseModel):
@@ -214,6 +234,10 @@ class TelegramConfig(BaseModel):
         default=True,
         description="Notifier à chaque trade clôturé",
     )
+    notify_on_position_open: bool = Field(
+        default=True,
+        description="Notifier à l'ouverture d'une nouvelle position",
+    )
     notify_on_health: bool = Field(
         default=True,
         description="Notifier si un module devient UNHEALTHY",
@@ -225,6 +249,36 @@ class TelegramConfig(BaseModel):
     daily_report_hour: int = Field(
         default=20, ge=0, le=23,
         description="Heure d'envoi du rapport quotidien (UTC)",
+    )
+    # ── Robustesse ──
+    retry_max_attempts: int = Field(
+        default=3, ge=0, le=10,
+        description="Nombre max de tentatives d'envoi avant abandon",
+    )
+    retry_base_delay: float = Field(
+        default=1.0, ge=0.1, le=10.0,
+        description="Délai initial entre deux retries (secondes)",
+    )
+    retry_max_delay: float = Field(
+        default=30.0, ge=1.0, le=120.0,
+        description="Délai maximum entre deux retries (secondes)",
+    )
+    rate_limit_max: float = Field(
+        default=20.0, ge=1.0, le=30.0,
+        description="Nombre maximum de messages par seconde",
+    )
+    # ── Commandes interactives ──
+    command_enabled: bool = Field(
+        default=True,
+        description="Activer les commandes interactives (/status, /pause, etc.)",
+    )
+    command_polling_interval: int = Field(
+        default=2, ge=1, le=10,
+        description="Intervalle de polling getUpdates (secondes)",
+    )
+    admin_chat_ids: List[str] = Field(
+        default_factory=list,
+        description="Chat IDs admin supplémentaires (si vide, seul chat_id est admin)",
     )
 
 

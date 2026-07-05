@@ -69,6 +69,8 @@ exchange:
   #     Le bot utilise maintenant le DEMO TRADING (demo-fapi.binance.com).
   #     Laissez sandbox: true pour activer le mode démo.
   sandbox: true
+  # OBLIGATOIRE — ce bot ne supporte que les futures (USDS-M).
+  # Les flux WebSocket, l'exécution et le sizing sont tous futures-only.
   futures: true
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -85,9 +87,19 @@ telegram:
   bot_token: "VOTRE_TOKEN_BOTFATHER"
   chat_id: "VOTRE_CHAT_ID"
   notify_on_trade: true
+  notify_on_position_open: true
   notify_on_health: true
   daily_report: true
   daily_report_hour: 20
+  # ── Robustesse ──
+  retry_max_attempts: 3
+  retry_base_delay: 1.0
+  retry_max_delay: 30.0
+  rate_limit_max: 20.0
+  # ── Commandes interactives ──
+  command_enabled: true
+  command_polling_interval: 2
+  admin_chat_ids: []
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Application

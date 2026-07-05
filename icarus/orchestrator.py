@@ -18,6 +18,7 @@ import asyncio
 import logging
 import signal as signal_module
 import time
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from icarus.config.loader import load_config
@@ -42,7 +43,7 @@ from icarus.data.stream import BinanceDataProvider
 from icarus.execution import SpotExecutionController, FuturesExecutionController
 from icarus.monitoring.dashboard import Dashboard
 from icarus.monitoring.health import HealthMonitor
-from icarus.monitoring.telegram import TelegramNotifier
+from icarus.monitoring.telegram import TelegramBot
 from icarus.risk import SpotRiskController, FuturesRiskController
 from icarus.signal.engine import ScalpingSignalEngine
 
@@ -82,7 +83,16 @@ class Orchestrator:
         self._dashboard: Optional[Dashboard] = None
 
         # Telegram
-        self._telegram: Optional[TelegramNotifier] = None
+        self._telegram: Optional[TelegramBot] = None
+
+        # Flag de pause (pour commande /pause)
+        self._paused = False
+
+        # Flag anti-double shutdown
+        self._shutting_down = False
+
+        # Timestamps d'ouverture des positions (pour durée dans trade alert)
+        self._position_timestamps: Dict[str, float] = {}
 
         # État
         self._running = False
@@ -120,6 +130,8 @@ class Orchestrator:
                 buffer_size=200,
                 event_bus=self._bus,
                 stale_timeout=self._raw_config.health.stale_data_critical,
+                futures=self._exchange_cfg.futures,
+                sandbox=self._exchange_cfg.sandbox,
             )
             self._data_providers[sym] = provider
             logger.info(f"    ✅ DataProvider: {sym}")
@@ -161,7 +173,8 @@ class Orchestrator:
         )
 
         # Telegram
-        self._telegram = TelegramNotifier(config=self._telegram_cfg)
+        self._telegram = TelegramBot(config=self._telegram_cfg)
+        self._register_telegram_commands()
 
         logger.info("✅ Tous les composants sont prêts.")
 
@@ -177,9 +190,12 @@ class Orchestrator:
         self._running = True
         self._start_time = time.time()
 
-        # 2. Démarrage de tous les DataStreams
+        # 2. Démarrage de tous les DataStreams (avec stagger pour éviter
+        #    d'ouvrir 6 connexions WebSocket simultanées vers le même host
+        #    demo, ce qui provoque des timeouts d'ouverture de handshake).
         for sym, provider in self._data_providers.items():
             await provider.start()
+            await asyncio.sleep(0.5)  # stagger de 500ms entre chaque symbole
         logger.info("🚀 Tous les flux de données sont démarrés.")
 
         # 3. Attente des premières données sur au moins une paire
@@ -188,13 +204,17 @@ class Orchestrator:
 
         logger.info("✅ Données suffisantes. Lancement de la boucle principale.")
 
-        # 4. Notification startup Telegram
-        await self._notify_startup()
+        # 4. Démarrage du bot Telegram (sender worker + poller)
+        if self._telegram:
+            await self._telegram.start()
 
-        # 5. Enregistrement du graceful shutdown
+        # 5. Notification startup Telegram
+        self._notify_startup()
+
+        # 6. Enregistrement du graceful shutdown
         self._register_signal_handlers()
 
-        # 6. Boucle principale
+        # 7. Boucle principale
         try:
             await self._main_loop()
         except asyncio.CancelledError:
@@ -260,7 +280,7 @@ class Orchestrator:
                         if self._telegram:
                             unhealthy = [s for s in self._last_health_statuses if s.status.value != "healthy"]
                             if unhealthy:
-                                await self._telegram.send_health_alert(unhealthy)
+                                self._telegram.send_health_alert(unhealthy)
 
                         logger.error("[Orchestrator] ⛔ Health check FAILED — arrêt d'urgence.")
                         self._running = False
@@ -276,7 +296,7 @@ class Orchestrator:
                             balance = await self._execution.get_balance("USDT")
                         except Exception:
                             pass
-                        await self._telegram.send_daily_report(
+                        self._telegram.send_daily_report(
                             self._risk.get_stats(), balance
                         )
                     last_daily_check = now
@@ -324,6 +344,9 @@ class Orchestrator:
             Symbol → MarketSnapshot (ou None si indisponible).
         """
         # Garde-fous
+        if self._paused:
+            return
+
         if time.time() < self._cooldown_until:
             return
 
@@ -407,10 +430,29 @@ class Orchestrator:
         if success:
             self._cooldown_until = time.time() + self._cfg.cooldown_seconds
             self._current_symbol = best_sym
+
+            # Enregistrer le timestamp pour calculer la durée du trade
+            self._position_timestamps[client_id] = time.time()
+
             logger.info(
                 f"[Orchestrator] ✅ ORDRE PLACÉ [{best_sym}]: {best_signal.action.value} "
                 f"{validated.position.amount} @ {best_signal.entry}"
             )
+
+            # Notification Telegram d'ouverture de position (non-bloquante)
+            if self._telegram:
+                direction_str = (
+                    best_signal.direction.value
+                    if best_signal.direction
+                    else best_signal.action.value.upper()
+                )
+                self._telegram.send_position_open_alert(
+                    symbol=best_sym,
+                    direction=direction_str,
+                    signal=best_signal,
+                    position=validated.position,
+                    leverage=self._cfg.leverage,
+                )
         else:
             logger.warning("[Orchestrator] Échec du placement d'ordre.")
 
@@ -429,9 +471,11 @@ class Orchestrator:
                 f"PnL: {trade.pnl:+.2f} $ | {trade.reason.value}"
             )
 
-            # Notification Telegram
+            # Notification Telegram (non-bloquante, avec durée si dispo)
             if self._telegram:
-                await self._telegram.send_trade_alert(trade)
+                if trade.client_id in self._position_timestamps:
+                    object.__setattr__(trade, '_opened_at', self._position_timestamps.pop(trade.client_id))
+                self._telegram.send_trade_alert(trade)
 
     # ═════════════════════════════════════════════════════════════════════
     # Dashboard (enrichi multi-paires)
@@ -503,7 +547,7 @@ class Orchestrator:
     # Telegram
     # ═════════════════════════════════════════════════════════════════════
 
-    async def _notify_startup(self) -> None:
+    def _notify_startup(self) -> None:
         """Envoie une notification Telegram au démarrage."""
         if not self._telegram:
             return
@@ -517,7 +561,189 @@ class Orchestrator:
             f"Risque/trade: {self._cfg.risk_per_trade*100:.1f}% | Kelly: {self._cfg.kelly_fraction*100:.0f}%\n"
             f"Seuil score: {self._cfg.threshold_base:.0f}"
         )
-        await self._telegram.send_startup(summary)
+        self._telegram.send_startup(summary)
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Commandes Telegram
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _register_telegram_commands(self) -> None:
+        """Enregistre les handlers de commandes Telegram."""
+        if not self._telegram or not self._telegram.is_available:
+            return
+
+        self._telegram.register_command("start", self._cmd_start)
+        self._telegram.register_command("help", self._cmd_help)
+        self._telegram.register_command("status", self._cmd_status)
+        self._telegram.register_command("pnl", self._cmd_pnl)
+        self._telegram.register_command("positions", self._cmd_positions)
+        self._telegram.register_command("config", self._cmd_config)
+        self._telegram.register_command("pause", self._cmd_pause)
+        self._telegram.register_command("resume", self._cmd_resume)
+        self._telegram.register_command("stop", self._cmd_stop)
+
+    # ── Handlers de commandes ───────────────────────────────────────────
+
+    async def _cmd_help_list(self) -> str:
+        """Retourne la liste des commandes (utilisée par /start et /help)."""
+        return (
+            "/status — État actuel du bot (PnL, positions, uptime)\n"
+            "/pnl — Détail des performances\n"
+            "/positions — Positions ouvertes\n"
+            "/config — Configuration active\n"
+            "/pause — Mettre en pause les nouveaux signaux\n"
+            "/resume — Reprendre le scan\n"
+            "/stop — Arrêter le bot\n"
+            "/help — Afficher cette liste"
+        )
+
+    async def _cmd_start(self, chat_id: str, args: str) -> str:
+        """Message de bienvenue + liste des commandes."""
+        cmd_list = await self._cmd_help_list()
+        return (
+            "🚀 <b>Icarus Bot — Scalping Intraday Automatisé</b>\n\n"
+            "Bot de trading multi-paires sur Binance Futures (USDS-M). "
+            "Scalping algorithmique avec scoring multi-indicateurs, "
+            "gestion de risque Kelly, et exécution automatique.\n\n"
+            "📋 <b>Commandes disponibles :</b>\n"
+            f"{cmd_list}\n\n"
+            "<i>Envoyez une commande pour interagir avec le bot.</i>"
+        )
+
+    async def _cmd_help(self, chat_id: str, args: str) -> str:
+        """Rappel des commandes."""
+        cmd_list = await self._cmd_help_list()
+        return f"📋 <b>Commandes disponibles :</b>\n{cmd_list}"
+
+    async def _cmd_status(self, chat_id: str, args: str) -> str:
+        """État global du bot."""
+        uptime = time.time() - self._start_time
+        hours, remainder = divmod(int(uptime), 3600)
+        mins, secs = divmod(remainder, 60)
+        uptime_str = f"{hours}h{mins:02d}m{secs:02d}s"
+
+        active_positions = 0
+        pending_orders = 0
+        balance = 0.0
+        if self._execution:
+            try:
+                active_positions = await self._execution.get_open_positions_count()
+                pending_orders = await self._execution.get_pending_orders_count()
+                balance = await self._execution.get_balance("USDT")
+            except Exception:
+                pass
+
+        paused_str = "⏸️ PAUSÉ" if self._paused else "▶️ ACTIF"
+
+        stats = self._risk.get_stats() if self._risk else None
+        pnl_str = ""
+        if stats:
+            pnl_str = (
+                f"PnL Jour: <b>{stats.daily_pnl:+.2f} $</b>\n"
+                f"PnL Total: {stats.total_pnl:+.2f} $\n"
+            )
+
+        return (
+            f"📊 <b>Statut Icarus</b> — {paused_str}\n\n"
+            f"⏱️ Uptime: {uptime_str}\n"
+            f"🏦 Solde: {balance:.2f} USDT\n"
+            f"{pnl_str}"
+            f"📈 Positions: {active_positions}\n"
+            f"📋 Ordres en attente: {pending_orders}\n"
+            f"🔔 Signaux générés: {self._signals_count}\n"
+            f"⏳ Cooldown: {max(0, self._cooldown_until - time.time()):.0f}s\n\n"
+            f"<i>{datetime.now().strftime('%H:%M:%S')}</i>"
+        )
+
+    async def _cmd_pnl(self, chat_id: str, args: str) -> str:
+        """Détail des performances."""
+        stats = self._risk.get_stats() if self._risk else None
+        if not stats:
+            return "Aucune statistique disponible."
+
+        total = stats.win_count + stats.loss_count
+        wr = (stats.win_count / total * 100) if total > 0 else 0.0
+
+        return (
+            f"📊 <b>Performances</b>\n\n"
+            f"💰 PnL Jour: <b>{stats.daily_pnl:+.2f} $</b>\n"
+            f"💰 PnL Total: <b>{stats.total_pnl:+.2f} $</b>\n"
+            f"\n"
+            f"📈 Trades: {total} ({stats.win_count}W / {stats.loss_count}L)\n"
+            f"🎯 Win Rate: {wr:.1f}%\n"
+            f"📉 Max Drawdown: {stats.max_drawdown:.2f} $\n"
+            f"\n"
+            f"<i>{datetime.now().strftime('%H:%M:%S')}</i>"
+        )
+
+    async def _cmd_positions(self, chat_id: str, args: str) -> str:
+        """Liste des positions ouvertes."""
+        if not self._execution:
+            return "ExecutionEngine non initialisé."
+
+        try:
+            positions = await self._execution.get_open_positions()
+        except Exception as e:
+            return f"❌ Erreur récupération positions: {e}"
+
+        if not positions:
+            return "📭 Aucune position ouverte."
+
+        lines = ["📈 <b>Positions ouvertes</b>\n"]
+        for pos in positions:
+            symbol = getattr(pos, 'symbol', '?')
+            side = getattr(pos, 'side', '?')
+            entry = getattr(pos, 'entry_price', 0.0)
+            amount = getattr(pos, 'amount', 0.0)
+            pnl = getattr(pos, 'unrealized_pnl', 0.0)
+            pnl_pct = getattr(pos, 'unrealized_pnl_percent', 0.0)
+            lines.append(
+                f"{'📈' if str(side).upper() == 'BUY' else '📉'} <b>{symbol}</b> {str(side).upper()}\n"
+                f"   Entrée: {entry:.4f} | Qté: {amount:.4f}\n"
+                f"   PnL latent: {pnl:+.4f} $ ({pnl_pct:+.2f}%)\n"
+            )
+
+        lines.append(f"\n<i>{datetime.now().strftime('%H:%M:%S')}</i>")
+        return "\n".join(lines)
+
+    async def _cmd_config(self, chat_id: str, args: str) -> str:
+        """Résumé de la configuration."""
+        return (
+            f"📋 <b>Configuration active</b>\n\n"
+            f"Paires: {', '.join(self._cfg.symbols)}\n"
+            f"Levier: {self._cfg.leverage}x | Mode: {self._cfg.margin_mode}\n"
+            f"TP1: {self._cfg.tp1_percent*100:.1f}% (frac: {int(self._cfg.tp1_fraction*100)}%)\n"
+            f"TP2: {self._cfg.tp2_percent*100:.1f}%\n"
+            f"SL: {self._cfg.fixed_sl_percent*100:.1f}%\n"
+            f"Risk/trade: {self._cfg.risk_per_trade*100:.2f}%\n"
+            f"Kelly fraction: {self._cfg.kelly_fraction*100:.0f}%\n"
+            f"Seuil score: {self._cfg.threshold_base:.0f}/100\n"
+            f"Cooldown: {self._cfg.cooldown_seconds}s\n"
+            f"Max positions: {self._cfg.max_positions}\n"
+            f"\n<i>{datetime.now().strftime('%H:%M:%S')}</i>"
+        )
+
+    async def _cmd_pause(self, chat_id: str, args: str) -> str:
+        """Met en pause le scan de nouveaux signaux."""
+        if self._paused:
+            return "⏸️ Le bot est déjà en pause."
+        self._paused = True
+        logger.info("[Telegram] /pause — Scan de signaux mis en pause.")
+        return "⏸️ <b>Scan de signaux mis en PAUSE.</b>\nLes positions ouvertes continuent d'être gérées.\n\nUtilisez /resume pour reprendre."
+
+    async def _cmd_resume(self, chat_id: str, args: str) -> str:
+        """Reprend le scan de signaux."""
+        if not self._paused:
+            return "▶️ Le bot n'est pas en pause."
+        self._paused = False
+        logger.info("[Telegram] /resume — Scan de signaux repris.")
+        return "▶️ <b>Scan de signaux REPRIS.</b>"
+
+    async def _cmd_stop(self, chat_id: str, args: str) -> str:
+        """Arrêt du bot."""
+        logger.warning("[Telegram] /stop — Arrêt demandé via Telegram.")
+        asyncio.create_task(self._shutdown_with_reason("Commande /stop Telegram"))
+        return "🛑 <b>Arrêt du bot demandé.</b>\nFermeture en cours…"
 
     # ═════════════════════════════════════════════════════════════════════
     # Shutdown
@@ -538,10 +764,20 @@ class Orchestrator:
         except Exception:
             logger.debug("Signal handlers non supportés sur cette plateforme.")
 
+    async def _shutdown_with_reason(self, reason: str) -> None:
+        """Arrêt propre avec raison personnalisée (appelé par /stop Telegram)."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        logger.info(f"🛑 Arrêt demandé: {reason}")
+        # Le shutdown complet sera exécuté par _shutdown()
+        await self._shutdown()
+
     async def _shutdown(self) -> None:
         """Arrêt propre de tous les modules."""
-        if not self._running:
+        if self._shutting_down:
             return
+        self._shutting_down = True
 
         logger.info("🛑 Arrêt du bot en cours...")
         self._running = False
@@ -569,9 +805,9 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"  Erreur fermeture exchange: {e}")
 
-        # Fermer le notificateur Telegram
+        # Arrêter le bot Telegram (sender worker + poller)
         if self._telegram:
-            await self._telegram.send_stop("Manuel (Ctrl+C)")
-            await self._telegram.close()
+            self._telegram.send_stop("Manuel (Ctrl+C)")
+            await self._telegram.stop()
 
         logger.info("✅ Bot arrêté proprement.")

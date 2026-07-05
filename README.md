@@ -264,31 +264,62 @@ Le score combine trois facteurs pondérés :
 
 ---
 
-## 📱 Telegram
+## 📱 Telegram v2 — Notifications & Commandes interactives
 
-Pour activer les notifications :
+Le bot Telegram a été entièrement refondu (v2) avec :
 
-1. Créer un bot via [@BotFather](https://t.me/BotFather) sur Telegram
-2. Récupérer le token (ex: `123456:ABC-DEF...`)
-3. Envoyer `/start` à ton bot, puis demander ton chat_id à [@userinfobot](https://t.me/userinfobot)
-4. Remplir `config.yaml` :
+- **Queue asyncio non-bloquante** — les notifications n'impactent pas la boucle de trading
+- **Retry avec exponential backoff** (3 tentatives, configurable)
+- **Rate limiter** (token bucket, 20 msg/sec par défaut)
+- **Commandes interactives** — tu peux piloter le bot depuis Telegram
+
+### Configuration
 
 ```yaml
 telegram:
   enabled: true
   bot_token: "TON_TOKEN"
   chat_id: "TON_CHAT_ID"
+  notify_on_trade: true
+  notify_on_position_open: true    # 🆕 Alerte à l'ouverture de position
+  notify_on_health: true
+  daily_report: true
+  daily_report_hour: 20
+  # ── Robustesse ──
+  retry_max_attempts: 3
+  retry_base_delay: 1.0
+  retry_max_delay: 30.0
+  rate_limit_max: 20.0
+  # ── Commandes interactives ──
+  command_enabled: true
+  command_polling_interval: 2
+  admin_chat_ids: []
 ```
 
-### Notifications envoyées
+### Notifications automatiques (push)
 
 | Événement | Message |
 |-----------|---------|
 | 🚀 Démarrage | Config résumée (paires, TP/SL, risque) |
-| 🟢/🔴 Trade clôturé | PnL, prix entrée/sortie, raison |
+| 🔔 Nouvelle position | Entrée, SL, TP1/TP2, taille, risque, score, levier |
+| 🟢/🔴 Trade clôturé | PnL, prix entrée/sortie, ⏱️ durée, raison |
 | 🚨 Alerte santé | Module degraded/unhealthy |
 | 📊 Rapport quotidien | PnL jour, win rate, solde |
 | 🛑 Arrêt | Notification d'arrêt propre |
+
+### Commandes interactives (pull)
+
+| Commande | Description |
+|----------|-------------|
+| `/start` | Message de bienvenue + liste des commandes |
+| `/help` | Rappel des commandes disponibles |
+| `/status` | État global (PnL, positions, uptime, solde, cooldown) |
+| `/pnl` | Détail des performances (W/L, win rate, drawdown) |
+| `/positions` | Positions ouvertes (entrée, qté, PnL latent) |
+| `/config` | Configuration active (paires, TP%, SL%, levier…) |
+| `/pause` | Met en pause les nouveaux signaux (positions gérées) |
+| `/resume` | Reprend le scan de signaux |
+| `/stop` | Arrêt graceful du bot |
 
 ---
 
